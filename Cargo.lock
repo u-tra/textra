@@ -1498,7 +1498,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "textra"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "boa_engine",
