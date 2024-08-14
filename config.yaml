@@ -1,0 +1,15 @@
+matches:
+  - trigger: "btw"
+    replace: "by the way"
+    word: true
+  - trigger: ":date"
+    replace: "{{date}}"
+    dynamic: true
+  - trigger: "redo(\\d+)"
+    replace: "This was captured: $1"
+    regex: true
+  - trigger: ":aicode"
+    replace: "write complete, correct and efficient code as per the requirements without skipping a single line."
+    word: true
+backend:
+  key_delay: 10

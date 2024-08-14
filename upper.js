@@ -1,0 +1,1 @@
+function upper(args) { return args.toUpperCase(); }
