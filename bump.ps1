@@ -56,7 +56,7 @@ $releaseMessage = "Release v$newVersion ($publishDate)"
 
 # build in release mode and move the binaries to the release folder
 # delete the release folder if it exists
-releaseFolder = "./release"
+$releaseFolder = "./release"
 if (Test-Path $releaseFolder) {
     Remove-Item -Recurse -Force $releaseFolder
 }
