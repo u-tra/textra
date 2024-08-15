@@ -66,10 +66,10 @@ if (-not (Test-Path $releaseFolder)) {
 }
 
 # build for windows
-cargo build --release  --target x86_64-pc-windows-msvc --out-dir $releaseFolder
+cargo build --release  --target x86_64-pc-windows-msvc --artifact-dir $releaseFolder
 Write-Output "🔨 Successfully built Windows binary "
 # build for linux
-cargo build --release  --target x86_64-unknown-linux-gnu --out-dir $releaseFolder
+cargo build --release  --target x86_64-unknown-linux-gnu --artifact-dir $releaseFolder
 Write-Output "🔨 Successfully built Linux binary "
 
 
