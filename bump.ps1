@@ -66,12 +66,15 @@ if (-not (Test-Path $releaseFolder)) {
 }
 
 # build for windows
-cargo build --release  --target x86_64-pc-windows-msvc --artifact-dir $releaseFolder
+cargo build --release  --target x86_64-pc-windows-msvc # --artifact-dir $releaseFolder
 Write-Output "🔨 Successfully built Windows binary "
 # build for linux
-cargo build --release  --target x86_64-unknown-linux-gnu --artifact-dir $releaseFolder
-Write-Output "🔨 Successfully built Linux binary "
+# cargo build --release  --target x86_64-unknown-linux-gnu # --artifact-dir $releaseFolder
+# Write-Output "🔨 Successfully built Linux binary "
 
+# move the binaries to the release folder
+Move-Item -Path "./target/x86_64-pc-windows-msvc/release/textra.exe" -Destination $releaseFolder
+# Move-Item -Path "./target/x86_64-unknown-linux-gnu/release/textra" -Destination $releaseFolder
 
 
 
@@ -91,7 +94,7 @@ if ($local) {
     cargo build --release --bin textra --target x86_64-pc-windows-msvc
 
     # Build for Linux
-    cargo build --release --bin textra --target x86_64-unknown-linux-gnu
+    # cargo build --release --bin textra --target x86_64-unknown-linux-gnu
 
     # Create a new release
     $releaseId = New-RandomGuid
@@ -101,10 +104,7 @@ if ($local) {
     # Copy Windows binary to release directory
     $windowsBinaryPath = "./target/x86_64-pc-windows-msvc/release/textra.exe"
     Copy-Item -Path $windowsBinaryPath -Destination "$releasePath/textra-windows.exe"
-
-    # Copy Linux binary to release directory
-    $linuxBinaryPath = "./target/x86_64-unknown-linux-gnu/release/textra"
-    Copy-Item -Path $linuxBinaryPath -Destination "$releasePath/textra-linux"
+ 
 
     Write-Output "🎉 Release v$newVersion completed locally! Binaries are available in $releasePath"
     exit 0
