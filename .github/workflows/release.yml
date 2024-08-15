@@ -14,8 +14,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Determine Release Tag
-        id: release_tag
-        run: echo "RELEASE_TAG=v$(date +'%Y.%m.%d.%H%M%S')" >> $GITHUB_ENV
+        id: determine_release_tag
+        shell: powershell
+        run: |
+          $timestamp = Get-Date -Format "yyyy.MM.dd.HHmmss"
+          echo "RELEASE_TAG=v$timestamp" >> $env:GITHUB_ENV
 
       - name: Create Release
         id: create_release
