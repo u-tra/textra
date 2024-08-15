@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Audio Visualizer with Ace Editor</title>
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.9.6/ace.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ace/1.9.6/ext-language_tools.js"></script>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+            background-color: #161616;
+        }
+
+        #visualizer-container {
+            flex: 1;
+            width: 60%;
+            position: relative;
+            flex-direction: column;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #controls {
+            position: absolute;
+            top: 30px;
+            left: 20px;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+        }
+
+        #controls>* {
+            margin-right: 10px;
+            background-color:  #161616;
+            color: white;
+            padding: 5px 5px;
+            border-radius: 5px;
+            border: none;
+            cursor: pointer;
+            font-size: 20px;
+        }
+
+        #editor {
+            width: 40rem;
+            height: 100%;
+            position: relative;
+         top:0;
+         padding: 10px;
+            left: 0;
+        
+            bottom: 0px;
+                   overflow: hidden;
+            z-index: 10;
+        }
+
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 600, 'GRAD' 0, 'opsz' 48;
+            font-size: 20px;
+
+        }
+
+        #visualizer{
+            background-color: #161616;
+        }
+    </style>
+</head>
+
+<body>
+ 
+    <div id="editor"></div>
+    <div id="visualizer-container">
+        <div id="controls">
+            <span id="uploadButton" class="material-symbols-outlined">upload</span>
+            <input type="file" id="audioInput" accept="audio/*" style="display: none;">
+            <span id="playPauseButton" class="material-symbols-outlined" style="display: none;">play_arrow</span>
+            <span id="ejectButton" class="material-symbols-outlined" style="display: none;">eject</span>
+        </div>
+        <canvas id="visualizer"></canvas>
+    </div>
+
+    <script>
+        let editor, scene, camera, renderer, analyser, dataArray, gridCells, audioContext, source, buffer, isPlaying = false;
+
+        function initializeVisualizer() {
+            const canvas = document.getElementById('visualizer');
+
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 1000);
+            renderer = new THREE.WebGLRenderer({ canvas });
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+            
+            camera.position.z = 5;
+
+            createVisualization();
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            const canvas = document.getElementById('visualizer');
+            camera.aspect = canvas.clientWidth / canvas.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+        }
+
+        function createVisualization() {
+            const gridRows = 10;
+            const gridCols = 10;
+            gridCells = [];
+            const cellWidth = 2 / gridCols;
+            const cellHeight = 2 / gridRows;
+
+            for (let row = 0; row < gridRows; row++) {
+                for (let col = 0; col < gridCols; col++) {
+                    const geometry = new THREE.PlaneGeometry(cellWidth, cellHeight);
+                    const material = new THREE.MeshBasicMaterial({ color:  "#161616"});
+                    const cell = new THREE.Mesh(geometry, material);
+
+                    cell.position.x = (col / gridCols) * 2 - 1 + cellWidth / 2;
+                    cell.position.y = (row / gridRows) * 2 - 1 + cellHeight / 2;
+
+                    gridCells.push(cell);
+                    scene.add(cell);
+                }
+            }
+        }
+
+        function setupAudio(file) {
+            const reader = new FileReader();
+            reader.readAsArrayBuffer(file);
+            reader.onload = async (e) => {
+                audioContext = new AudioContext();
+                buffer = await audioContext.decodeAudioData(e.target.result);
+
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 1024;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+                startAudio();
+
+                document.getElementById('audioInput').style.display = 'none';
+                document.getElementById('playPauseButton').style.display = 'inline-block';
+                document.getElementById('ejectButton').style.display = 'inline-block';
+
+                animate();
+            };
+        }
+
+        function startAudio() {
+            if (source) {
+                source.disconnect();
+            }
+            source = audioContext.createBufferSource();
+            source.buffer = buffer;
+            source.connect(analyser);
+            analyser.connect(audioContext.destination);
+            source.start(0);
+            audioContext.resume();
+            isPlaying = true;
+            document.getElementById('playPauseButton').textContent = 'pause';
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                updateVisualization();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function updateVisualization() {
+            const bandsPerCell = Math.floor(dataArray.length / gridCells.length);
+            gridCells.forEach((cell, index) => {
+                const startFrequency = index * bandsPerCell;
+                const endFrequency = startFrequency + bandsPerCell;
+                const amplitude = dataArray.slice(startFrequency, endFrequency).reduce((a, b) => a + b, 0) / bandsPerCell;
+
+                const color = new THREE.Color(`hsl(${(amplitude / 256) * 360}, 100%, 50%)`);
+                cell.material.color = color;
+            });
+        }
+
+        document.getElementById('audioInput').addEventListener('change', (event) => {
+            setupAudio(event.target.files[0]);
+        });
+
+        document.getElementById('playPauseButton').addEventListener('click', () => {
+            if (isPlaying) {
+                audioContext.suspend();
+                document.getElementById('playPauseButton').textContent = 'play_arrow';
+            } else {
+                audioContext.resume();
+                document.getElementById('playPauseButton').textContent = 'pause';
+            }
+            isPlaying = !isPlaying;
+        });
+
+        document.getElementById('uploadButton').addEventListener('click', () => {
+            document.getElementById('audioInput').click();
+        });
+
+        document.getElementById('ejectButton').addEventListener('click', () => {
+            if (audioContext) {
+                audioContext.close();
+            }
+            document.getElementById('audioInput').style.display = 'inline-block';
+            document.getElementById('playPauseButton').style.display = 'none';
+            document.getElementById('ejectButton').style.display = 'none';
+            isPlaying = false;
+        });
+
+        function initializeEditor() {
+            ace.require("ace/ext/language_tools");
+            editor = ace.edit("editor");
+            editor.setTheme("ace/theme/chaos");
+            editor.session.setMode("ace/mode/javascript");
+            editor.setOptions({
+                enableBasicAutocompletion: true,
+                enableLiveAutocompletion: true,
+ 
+                fontSize: "15px",
+                softTabs: true,
+                tabSize: 4,
+                showLineNumbers: true,
+                showGutter: true,
+                highlightActiveLine: false,
+ 
+                enableSnippets: true,
+                wrap: true,
+                highlightGutterLine: false,
+                cursorStyle: "smooth",
+ 
+                wrapMargin: 40,
+                foldStyle: "manual",
+                showPrintMargin: false,
+                printMarginColumn: 87,
+                indentedSoftWrap: true,
+                fadeFoldWidgets: false,
+                scrollPastEnd: 1,
+                useTextAreaForIME: false,
+                mergeUndoDeltas: "timed",
+                showInvisibles: false,
+                persistentHScroll: false,
+                persistentVScroll: false,
+                animateScrolling: true,
+                fixedWidthGutter: false,
+                relativeLineNumbers: false,
+                tooltipFollowsMouse: true,
+                useSvgGutterIcons: false,
+                annotationsForFoldedLines: false,
+                customScrollbar: true,
+                gutterTooltipFollowsMouse: true,
+                liveAutocompletion: true,
+            });
+
+            editor.setValue(`
+            
+//visualization function
+function updateVisualization() {
+    const bandsPerCell = Math.floor(dataArray.length / gridCells.length);
+    gridCells.forEach((cell, index) => {
+        const startFrequency = index * bandsPerCell;
+        const endFrequency = startFrequency + bandsPerCell;
+        const amplitude = dataArray.slice(startFrequency, endFrequency).reduce((a, b) => a + b, 0) / bandsPerCell;
+
+        const color = new THREE.Color(\`hsl(\${(amplitude / 256) * 360}, 100%, 50%)\`);
+        cell.material.color = color;
+    });
+}`);
+
+            editor.clearSelection();
+
+            editor.session.on('change', function () {
+                try {
+                    eval(editor.getValue());
+                } catch (e) {
+                    console.error("Error in user code:", e);
+                }
+            });
+        }
+
+        initializeVisualizer();
+        initializeEditor();
+    </script>
+</body>
+
+</html>
