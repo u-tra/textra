@@ -1,4 +1,4 @@
-name: textra release
+name: Textra Release
 
 on:
   push:
@@ -9,17 +9,14 @@ permissions:
   contents: write
 
 jobs:
-
   create-release:
     if: contains(github.event.head_commit.message, 'release')
     runs-on: windows-latest
-    outputs:
-      release_upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Determine Release Tag
         id: release_tag
-        run: |
-          echo "RELEASE_TAG=v$(date +'%Y.%m.%d.%H%M%S')" >> $GITHUB_ENV
+        run: echo "RELEASE_TAG=v$(date +'%Y.%m.%d.%H%M%S')" >> $GITHUB_ENV
+
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -30,33 +27,6 @@ jobs:
           release_name: textra 🚀 release ${{ env.RELEASE_TAG }}
           draft: false
           prerelease: false
-
-  release:
-    needs: create-release
-    if: contains(github.event.head_commit.message, 'release')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [windows-latest ]
-        include:
-          - os: windows-latest
-            artifact_name: textra.exe
-            asset_name: textra-windows.exe
-
-
-    steps:
-      - uses: actions/checkout@v3
-
-      - name: Cache Cargo Registry and Target Directory
-        uses: actions/cache@v2
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
 
       - name: Setup Rust
         uses: actions-rs/toolchain@v1
@@ -73,7 +43,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          upload_url: ${{ needs.create-release.outputs.release_upload_url }}
-          asset_path: ./target/release/${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./target/release/textra.exe
+          asset_name: textra-windows.exe
           asset_content_type: application/octet-stream
+
+      - name: Publish to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
