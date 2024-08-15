@@ -3,7 +3,7 @@ name: textra release
 on:
   push:
     branches:
-      - main
+      - master
 
 permissions:
   contents: write
