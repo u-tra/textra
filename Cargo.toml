@@ -1,6 +1,6 @@
 [package]
 name = "textra"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 authors = ["incredimo <a@xo.rs>"]
 description = "text++"
@@ -24,6 +24,7 @@ serde = { version = "1.0.207", features = ["derive"] }
 serde_yaml = "0.9.34"
 threadpool = "1.8.1"
 tokio = { version = "1.39.2", features = ["full"] }
+
 
 
 

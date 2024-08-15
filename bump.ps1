@@ -56,7 +56,7 @@ $releaseMessage = "Release v$newVersion ($publishDate)"
 
 # build in release mode and move the binaries to the release folder
 # delete the release folder if it exists
-releaseFolder = "./release"
+$releaseFolder = "./release"
 if (Test-Path $releaseFolder) {
     Remove-Item -Recurse -Force $releaseFolder
 }
@@ -66,10 +66,10 @@ if (-not (Test-Path $releaseFolder)) {
 }
 
 # build for windows
-cargo build --release --bin textra --target x86_64-pc-windows-msvc --out-dir $releaseFolder
+cargo build --release  --target x86_64-pc-windows-msvc --out-dir $releaseFolder
 Write-Output "🔨 Successfully built Windows binary "
 # build for linux
-cargo build --release --bin textra --target x86_64-unknown-linux-gnu --out-dir $releaseFolder
+cargo build --release  --target x86_64-unknown-linux-gnu --out-dir $releaseFolder
 Write-Output "🔨 Successfully built Linux binary "
 
 
