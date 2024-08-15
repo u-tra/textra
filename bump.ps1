@@ -54,30 +54,26 @@ if ($local) {
 }
 $releaseMessage = "Release v$newVersion ($publishDate)"
 
-# Build binaries for Windows and Linux
-Write-Output "🔨 Building binaries for Windows and Linux..."
-
-# Build for Windows
-cargo build --release --bin textra --target x86_64-pc-windows-msvc
-Write-Output "🔨 Successfully built Windows binary"
-
-# Build for Linux
-cargo build --release --bin textra --target x86_64-unknown-linux-gnu
-Write-Output "🔨 Successfully built Linux binary"
-
-# Move binaries to the release folder
-$releaseFolder = "./release"
-if (-Not (Test-Path $releaseFolder)) {
+# build in release mode and move the binaries to the release folder
+# delete the release folder if it exists
+releaseFolder = "./release"
+if (Test-Path $releaseFolder) {
+    Remove-Item -Recurse -Force $releaseFolder
+}
+# create a release folder if it doesn't exist
+if (-not (Test-Path $releaseFolder)) {
     New-Item -ItemType Directory -Path $releaseFolder | Out-Null
 }
 
-$windowsBinaryPath = "./target/x86_64-pc-windows-msvc/release/textra.exe"
-$linuxBinaryPath = "./target/x86_64-unknown-linux-gnu/release/textra"
+# build for windows
+cargo build --release --bin textra --target x86_64-pc-windows-msvc --out-dir $releaseFolder
+Write-Output "🔨 Successfully built Windows binary "
+# build for linux
+cargo build --release --bin textra --target x86_64-unknown-linux-gnu --out-dir $releaseFolder
+Write-Output "🔨 Successfully built Linux binary "
 
-Copy-Item -Path $windowsBinaryPath -Destination "$releaseFolder/textra-windows.exe"
-Copy-Item -Path $linuxBinaryPath -Destination "$releaseFolder/textra-linux"
 
-Write-Output "🎉 Binaries moved to $releaseFolder"
+
 
 # Add ALL files to git
 git add .
@@ -89,7 +85,28 @@ git commit -m "$commitMessage"
 git tag -a "v$newVersion" -m "$releaseMessage"
 
 if ($local) {
-    Write-Output "🏠 Running in local mode. Binaries are available in $releaseFolder"
+    Write-Output "🏠 Running in local mode, building binaries for Windows and Linux..."
+
+    # Build for Windows
+    cargo build --release --bin textra --target x86_64-pc-windows-msvc
+
+    # Build for Linux
+    cargo build --release --bin textra --target x86_64-unknown-linux-gnu
+
+    # Create a new release
+    $releaseId = New-RandomGuid
+    $releasePath = "releases/$releaseId"
+    New-Item -ItemType Directory -Path $releasePath | Out-Null
+
+    # Copy Windows binary to release directory
+    $windowsBinaryPath = "./target/x86_64-pc-windows-msvc/release/textra.exe"
+    Copy-Item -Path $windowsBinaryPath -Destination "$releasePath/textra-windows.exe"
+
+    # Copy Linux binary to release directory
+    $linuxBinaryPath = "./target/x86_64-unknown-linux-gnu/release/textra"
+    Copy-Item -Path $linuxBinaryPath -Destination "$releasePath/textra-linux"
+
+    Write-Output "🎉 Release v$newVersion completed locally! Binaries are available in $releasePath"
     exit 0
 }
 
