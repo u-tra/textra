@@ -1,0 +1,27 @@
+[general]
+key_delay = 10
+
+[[replacements]]
+trigger = "btw"
+replace = "by the way"
+word = true
+
+[[replacements]]
+trigger = ":date"
+replace = "{{date}}"
+dynamic = true
+
+[[replacements]]
+trigger = "redo(\\d+)"
+replace = "This was captured: $1"
+regex = true
+
+[[replacements]]
+trigger = ":aicode"
+replace = "write complete, correct and efficient code as per the requirements without skipping a single line."
+word = true
+
+[[replacements]]
+trigger = "[:command]"
+replace = "echo 'This is a command output'"
+evaluate = true

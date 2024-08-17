@@ -1,1 +1,0 @@
-function echo(args) { return 'Echo: ' + args; }
