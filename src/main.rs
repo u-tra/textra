@@ -13,40 +13,44 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{env, fs, process::Command};
+use std::{env, fs};
 
-#[derive(Debug, Deserialize, Serialize, Clone,Default)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct Config {
+    matches: Vec<Match>,
     #[serde(default)]
-    general: GeneralConfig,
-    #[serde(default)]
-    replacements: Vec<Replacement>,
+    backend: BackendConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-struct GeneralConfig {
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(tag = "type")]
+enum Match {
+    Simple {
+        trigger: String,
+        replace: String,
+        #[serde(default)]
+        propagate_case: bool,
+        #[serde(default)]
+        word: bool,
+    },
+    Regex {
+        pattern: String,
+        replace: String,
+    },
+    Dynamic {
+        trigger: String,
+        action: String,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+struct BackendConfig {
     #[serde(default = "default_key_delay")]
     key_delay: u64,
 }
 
 fn default_key_delay() -> u64 {
     10
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct Replacement {
-    trigger: String,
-    replace: String,
-    #[serde(default)]
-    regex: bool,
-    #[serde(default)]
-    propagate_case: bool,
-    #[serde(default)]
-    word: bool,
-    #[serde(default)]
-    dynamic: bool,
-    #[serde(default)]
-    evaluate: bool,
 }
 
 struct AppState {
@@ -121,18 +125,24 @@ fn load_config() -> Result<Config> {
     let config_path = get_config_path()?;
     let config_str = fs::read_to_string(&config_path)
         .with_context(|| format!("Failed to read config file: {:?}", config_path))?;
-    let config: Config = toml::from_str(&config_str)
+    let config: Config = serde_yaml::from_str(&config_str)
         .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
 
     minimo::showln!(yellow_bold, "┌─ ", white, "TEXTRA ", yellow_bold,"───────────────────────────────────────────────────────");
     minimo::showln!(yellow_bold, "│ ", green_bold,config_path.display());
-    if !config.replacements.is_empty() {
-        for replacement in &config.replacements {
-            let trim_length = if replacement.replace.len() + 3 > 50 { 50 } else { replacement.replace.len() + 3 };
-            let trimmed_replace = minimo::chop(&replacement.replace, trim_length)[0].clone();
-            minimo::showln!(yellow_bold, "│ ",yellow_bold,"▫ ", gray_dim, replacement.trigger, cyan_bold, " ⋯→ ", white_bold, trimmed_replace);
+    if !config.matches.is_empty() {
+        for match_rule in &config.matches {
+            let (trigger, replace) = match match_rule {
+                Match::Simple { trigger, replace, .. } => (trigger, replace),
+                Match::Regex { pattern, replace } => (pattern, replace),
+                Match::Dynamic { trigger, action } => (trigger, action),
+            };
+            let trim_length = if replace.len() + 3 > 50 { 50 } else { replace.len() + 3 };
+            let trimmed_replace = minimo::chop(replace, trim_length)[0].clone();
+            minimo::showln!(yellow_bold, "│ ", yellow_bold, "▫ ", gray_dim, trigger, cyan_bold, " ⋯→ ", white_bold, trimmed_replace);
         }
     }
+    // width is 60 characters
     minimo::showln!(yellow_bold, "└────────────────────────────────────────────────────────────────");
     minimo::showln!(gray_dim, "");
     Ok(config)
@@ -140,33 +150,53 @@ fn load_config() -> Result<Config> {
 
 fn get_config_path() -> Result<PathBuf> {
     let current_dir = env::current_dir()?;
-    let current_dir_config = current_dir.join("textra.toml");
+    let current_dir_config = current_dir.join("config.yaml");
     if current_dir_config.exists() {
         return Ok(current_dir_config);
     }
 
-    if let Some(home_dir) = dirs::home_dir() {
-        let home_config_dir = home_dir.join(".textra");
-        let home_config_file = home_config_dir.join("config.toml");
+    //if folder name is textra then create config.yaml in it
+    if current_dir.file_name().unwrap() == "textra" {
+        let config_file = current_dir.join("config.yaml");
+        create_default_config(&config_file)?;
+        return Ok(config_file);
+    }
+ 
+
+    if let Some(home_dir) = dirs::document_dir() {
+        let home_config_dir = home_dir.join("textra");
+        let home_config_file = home_config_dir.join("config.yaml");
         if home_config_file.exists() {
             return Ok(home_config_file);
         }
     }
 
+    //else create the config file in documents/textra/config.yaml
     let new_config_dir = current_dir.join("textra");
     fs::create_dir_all(&new_config_dir).context("Failed to create config directory")?;
-    let new_config_file = new_config_dir.join("config.toml");
+    let new_config_file = new_config_dir.join("config.yaml");
     create_default_config(&new_config_file)?;
     Ok(new_config_file)
 }
 
 fn create_default_config(path: &Path) -> Result<()> {
     let default_config = Config {
-        general: GeneralConfig::default(),
-        replacements: vec![],
+        matches: vec![
+            Match::Simple {
+                trigger: "btw".to_string(),
+                replace: "by the way".to_string(),
+                propagate_case: false,
+                word: false,
+            },
+            Match::Dynamic {
+                trigger: ":date".to_string(),
+                action: "{{date}}".to_string(),
+            },
+        ],
+        backend: BackendConfig { key_delay: 10 },
     };
-    let toml = toml::to_string_pretty(&default_config)?;
-    fs::write(path, toml).context("Failed to write default config file")?;
+    let yaml = serde_yaml::to_string(&default_config)?;
+    fs::write(path, yaml).context("Failed to write default config file")?;
     Ok(())
 }
 
@@ -263,70 +293,64 @@ async fn handle_key_event(app_state: Arc<AppState>, event: Event) -> Result<()> 
 async fn check_and_replace(app_state: &AppState, current_text: &mut String) -> Result<()> {
     let immutable_current_text = current_text.clone();
     let config = app_state.config.lock();
-    for replacement in &config.replacements {
-        if replacement.regex {
-            let regex = Regex::new(&replacement.trigger)?;
-            if let Some(captures) = regex.captures(&immutable_current_text) {
-                let mut final_replace = replacement.replace.clone();
-                for (i, capture) in captures.iter().enumerate().skip(1) {
-                    if let Some(capture) = capture {
-                        final_replace = final_replace.replace(&format!("${}", i), capture.as_str());
+    for match_rule in &config.matches {
+        match match_rule {
+            Match::Simple { trigger, replace, propagate_case, word } => {
+                if current_text.ends_with(trigger) {
+                    let start = immutable_current_text.len() - trigger.len();
+                    if !*word || (start == 0 || !immutable_current_text.chars().nth(start - 1).unwrap().is_alphanumeric()) {
+                        perform_replacement(
+                            current_text,
+                            config.backend.key_delay,
+                            &immutable_current_text[start..],
+                            replace,
+                            *propagate_case,
+                            false,
+                            app_state,
+                        ).await?;
+                        break;
                     }
                 }
-                perform_replacement(
-                    current_text,
-                    config.general.key_delay,
-                    &immutable_current_text,
-                    &final_replace,
-                    replacement.propagate_case,
-                    replacement.dynamic,
-                    replacement.evaluate,
-                    app_state,
-                ).await?;
-                break;
-            }
-        } else if immutable_current_text.contains(&replacement.trigger) {
-            let start = immutable_current_text.find(&replacement.trigger).unwrap();
-            let end = start + replacement.trigger.len();
-            if !replacement.word
-                || (start == 0 || !immutable_current_text.chars().nth(start - 1).unwrap().is_alphanumeric())
-                && (end == immutable_current_text.len() || !immutable_current_text.chars().nth(end).unwrap().is_alphanumeric())
-            {
-                perform_replacement(
-                    current_text,
-                    config.general.key_delay,
-                    &immutable_current_text[start..end],
-                    &replacement.replace,
-                    replacement.propagate_case,
-                    replacement.dynamic,
-                    replacement.evaluate,
-                    app_state,
-                ).await?;
-                break;
-            }
-        } else if let Some(content) = extract_complex_trigger(&immutable_current_text) {
-            if content == replacement.trigger {
-                perform_replacement(
-                    current_text,
-                    config.general.key_delay,
-                    &format!("[:{}]", content),
-                    &replacement.replace,
-                    replacement.propagate_case,
-                    replacement.dynamic,
-                    replacement.evaluate,
-                    app_state,
-                ).await?;
-                break;
-            }
+            },
+            Match::Regex { pattern, replace } => {
+                let regex = Regex::new(pattern)?;
+                if let Some(captures) = regex.captures(&immutable_current_text) {
+                    let mut replacement = replace.clone();
+                    for (i, capture) in captures.iter().enumerate().skip(1) {
+                        if let Some(capture) = capture {
+                            replacement = replacement.replace(&format!("${}", i), capture.as_str());
+                        }
+                    }
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        &immutable_current_text,
+                        &replacement,
+                        false,
+                        false,
+                        app_state,
+                    ).await?;
+                    break;
+                }
+            },
+            Match::Dynamic { trigger, action } => {
+                if current_text.ends_with(trigger) {
+                    let replacement = process_dynamic_replacement(action);
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        trigger,
+                        &replacement,
+                        false,
+                        true,
+                        app_state,
+                    ).await?;
+                    break;
+                }
+            },
         }
     }
     Ok(())
-}
-
-fn extract_complex_trigger(text: &str) -> Option<String> {
-    let start = text.rfind("[:").map(|i| i + 2)?;
-    let end = text[start..].find("]").map(|i| i + start)?;
-    Some(text[start..end].to_string())
 }
 
 async fn perform_replacement(
@@ -336,12 +360,9 @@ async fn perform_replacement(
     replacement: &str,
     propagate_case: bool,
     dynamic: bool,
-    evaluate: bool,
     app_state: &AppState,
 ) -> Result<()> {
-    let final_replacement = if evaluate {
-        evaluate_command(replacement)?
-    } else if dynamic {
+    let final_replacement = if dynamic {
         process_dynamic_replacement(replacement)
     } else if propagate_case {
         propagate_case_fn(original, replacement)
@@ -401,20 +422,6 @@ fn propagate_case_fn(original: &str, replacement: &str) -> String {
     }
 }
 
-fn evaluate_command(command: &str) -> Result<String> {
-    let output = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .output()
-        .context("Failed to execute command")?;
-
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        Err(anyhow::anyhow!("Command execution failed: {}", String::from_utf8_lossy(&output.stderr)))
-    }
-}
-
 async fn reload_config(app_state: Arc<AppState>) -> Result<()> {
     let mut config = app_state.config.lock();
     *config = load_config()?;
@@ -425,8 +432,7 @@ fn key_to_char(key: Key, shift_pressed: bool, caps_lock_on: bool) -> Option<char
     let base_char = match key {
         Key::KeyA => 'a', Key::KeyB => 'b', Key::KeyC => 'c', Key::KeyD => 'd',
         Key::KeyE => 'e', Key::KeyF => 'f', Key::KeyG => 'g', Key::KeyH => 'h',
-        Key::KeyI => 'i', Key::KeyJ => 'j', Key::KeyK => 'k', Key::KeyL => 'l',
-        Key::KeyM => 'm', Key::KeyN => 'n', Key::KeyO => 'o', Key::KeyP => 'p',
+        Key::KeyI => 'i', Key::KeyJ => 'j', Key::KeyK => 'k', Key::KeyL => 'l',Key::KeyM => 'm', Key::KeyN => 'n', Key::KeyO => 'o', Key::KeyP => 'p',
         Key::KeyQ => 'q', Key::KeyR => 'r', Key::KeyS => 's', Key::KeyT => 't',
         Key::KeyU => 'u', Key::KeyV => 'v', Key::KeyW => 'w', Key::KeyX => 'x',
         Key::KeyY => 'y', Key::KeyZ => 'z',
@@ -478,17 +484,3 @@ fn char_to_key(c: char) -> Key {
         _ => Key::Space,
     }
 }
-
-// Add this to your Cargo.toml:
-// [dependencies]
-// anyhow = "1.0"
-// chrono = "0.4"
-// tokio = { version = "1.0", features = ["full"] }
-// dirs = "4.0"
-// notify = "5.0"
-// parking_lot = "0.12"
-// rdev = "0.5"
-// regex = "1.5"
-// serde = { version = "1.0", features = ["derive"] }
-// toml = "0.5"
-// minimo = "0.3"
