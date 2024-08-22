@@ -1,10 +1,11 @@
 [package]
 name = "textra"
-version = "0.1.22"
+version = "0.1.23"
 edition = "2021"
 authors = ["incredimo <a@xo.rs>"]
-description = "text++"
+description = "type less, write more"
 license = "MIT"
+repository = "https://github.com/incredimo/textra"
 
 
 [dependencies]
@@ -29,6 +30,7 @@ tokio = { version = "1.39.2", features = ["full"] }
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
+
 
 
 
