@@ -9,11 +9,19 @@ use parking_lot::Mutex;
 use rdev::{listen, simulate, Event, EventType, Key};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::{env, fs, io};
+use std::io::Write;
+use std::process::Command;
+use winreg::enums::*;
+use winreg::RegKey;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{env, fs};
+use std::os::windows::process::CommandExt;
+
+use winapi::shared::minwindef::{LPARAM, WPARAM};
+ 
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct Config {
@@ -88,6 +96,19 @@ enum Message {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+    
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "install" => return install(),
+            "uninstall" => return uninstall(),
+            _ => {
+                eprintln!("Unknown command. Use 'install' or 'uninstall'.");
+                return Ok(());
+            }
+        }
+    }
+
     let app_state = Arc::new(AppState::new()?);
     let (sender, mut receiver) = mpsc::channel(100);
 
@@ -99,6 +120,148 @@ async fn main() -> Result<()> {
     config_watcher.abort();
     keyboard_listener.abort();
 
+    Ok(())
+}
+
+fn install() -> Result<()> {
+    println!("Installing Textra...");
+
+    // 1. Copy the executable to a permanent location
+    let exe_path = env::current_exe()?;
+    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+    fs::create_dir_all(&install_dir)?;
+    let install_path = install_dir.join("textra.exe");
+    fs::copy(&exe_path, &install_path)?;
+
+    // 2. Add to PATH
+    add_to_path(&install_dir)?;
+
+    // 3. Set up autostart
+    set_autostart(&install_path)?;
+
+    // 4. Create uninstaller
+    create_uninstaller(&install_dir)?;
+
+    // 5. Start the application in the background
+    start_background(&install_path)?;
+
+    println!("Textra has been installed and started. It will run automatically at startup.");
+    println!("To uninstall, run 'textra uninstall'.");
+    Ok(())
+}
+
+fn uninstall() -> Result<()> {
+    println!("Uninstalling Textra...");
+
+    // 1. Stop the running instance
+    stop_running_instance()?;
+
+    // 2. Remove from PATH
+    remove_from_path()?;
+
+    // 3. Remove autostart entry
+    remove_autostart()?;
+
+    // 4. Remove installation directory
+    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+    fs::remove_dir_all(&install_dir)?;
+
+    println!("Textra has been uninstalled successfully.");
+    Ok(())
+}
+
+fn create_uninstaller(install_dir: &Path) -> Result<()> {
+    let uninstaller_path = install_dir.join("uninstall.bat");
+    let uninstaller_content = format!(
+        "@echo off\n\
+        taskkill /F /IM textra.exe\n\
+        \"{0}\" uninstall\n\
+        rmdir /S /Q \"{1}\"\n",
+        install_dir.join("textra.exe").display(),
+        install_dir.display()
+    );
+    fs::write(uninstaller_path, uninstaller_content)?;
+    Ok(())
+}
+
+fn stop_running_instance() -> Result<()> {
+    Command::new("taskkill")
+        .args(&["/F", "/IM", "textra.exe"])
+        .output()?;
+    Ok(())
+}
+
+fn remove_from_path() -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu.create_subkey("Environment")?;
+    let path: String = env.get_value("PATH")?;
+    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+    let new_path: Vec<&str> = path
+        .split(';')
+        .filter(|&p| p != install_dir.to_str().unwrap())
+        .collect();
+    let new_path = new_path.join(";");
+    env.set_value("PATH", &new_path)?;
+    
+    // Broadcast WM_SETTINGCHANGE message
+    unsafe {
+        winapi::um::winuser::SendMessageTimeoutA(
+            winapi::um::winuser::HWND_BROADCAST,
+            winapi::um::winuser::WM_SETTINGCHANGE,
+            0 as WPARAM,
+            "Environment\0".as_ptr() as LPARAM,
+            winapi::um::winuser::SMTO_ABORTIFHUNG,
+            5000,
+            std::ptr::null_mut(),
+        );
+    }
+
+    Ok(())
+}
+
+fn remove_autostart() -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let (key, _) = hkcu.create_subkey(path)?;
+    key.delete_value("Textra")?;
+    Ok(())
+}
+
+fn add_to_path(install_dir: &Path) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu.create_subkey("Environment")?;
+    let path: String = env.get_value("PATH")?;
+    let new_path = format!("{};{}", path, install_dir.to_string_lossy());
+    env.set_value("PATH", &new_path)?;
+    
+    // Broadcast WM_SETTINGCHANGE message
+    unsafe {
+        winapi::um::winuser::SendMessageTimeoutA(
+            winapi::um::winuser::HWND_BROADCAST,
+            winapi::um::winuser::WM_SETTINGCHANGE,
+            0 as WPARAM,
+            "Environment\0".as_ptr() as LPARAM,
+            winapi::um::winuser::SMTO_ABORTIFHUNG,
+            5000,
+            std::ptr::null_mut(),
+        );
+    }
+
+    Ok(())
+}
+
+fn set_autostart(install_path: &Path) -> Result<()> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    let (key, _) = hkcu.create_subkey(path)?;
+    key.set_value("Textra", &install_path.to_string_lossy().to_string())?;
+    Ok(())
+}
+
+fn start_background(install_path: &Path) -> Result<()> {
+    Command::new(install_path)
+        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
+        .spawn()?;
     Ok(())
 }
 
@@ -128,8 +291,8 @@ fn load_config() -> Result<Config> {
     let config: Config = serde_yaml::from_str(&config_str)
         .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
 
-    minimo::showln!(yellow_bold, "┌─ ", white, "TEXTRA ", yellow_bold,"───────────────────────────────────────────────────────");
-    minimo::showln!(yellow_bold, "│ ", green_bold,config_path.display());
+    minimo::showln!(yellow_bold,"┌─",white_bold," TEXTRA", yellow_bold, " ───────────────────────────────────────────────────────");
+    minimo::showln!(yellow_bold,"│ ", green_bold,  config_path.display());
     if !config.matches.is_empty() {
         for match_rule in &config.matches {
             let (trigger, replace) = match match_rule {
@@ -137,13 +300,12 @@ fn load_config() -> Result<Config> {
                 Match::Regex { pattern, replace } => (pattern, replace),
                 Match::Dynamic { trigger, action } => (trigger, action),
             };
-            let trim_length = if replace.len() + 3 > 50 { 50 } else { replace.len() + 3 };
-            let trimmed_replace = minimo::chop(replace, trim_length)[0].clone();
-            minimo::showln!(yellow_bold, "│ ", yellow_bold, "▫ ", gray_dim, trigger, cyan_bold, " ⋯→ ", white_bold, trimmed_replace);
+            let trimmed = minimo::text::chop(replace, 50-trigger.len())[0].clone();
+            
+            minimo::showln!(yellow_bold, "│ ", yellow_bold, "▫ ", gray_dim, trigger, cyan_bold, " ⋯→ ", white_bold, trimmed);
         }
     }
-    // width is 60 characters
-    minimo::showln!(yellow_bold, "└────────────────────────────────────────────────────────────────");
+    minimo::showln!(yellow_bold, "└───────────────────────────────────────────────────────────────");
     minimo::showln!(gray_dim, "");
     Ok(config)
 }
