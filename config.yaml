@@ -1,11 +1,26 @@
 matches:
-- type: Simple
-  trigger: btw
-  replace: by the way
-  propagate_case: false
-  word: false
-- type: Dynamic
-  trigger: date
-  action: '{{date}}'
+  - type: Simple
+    trigger: btw
+    replace: by the way
+    propagate_case: false
+    word: false
+  - type: Dynamic
+    trigger: date
+    action: "{{date}}"
+  - type: Simple
+    trigger: "fyi"
+    replace: For your kind information.
+  - type: Simple
+    trigger: "lol"
+    replace: Laughing out loud.
+  - type: Simple
+    trigger: "rofl"
+    replace: Rolling on the floor laughing.
+  - type: Simple
+    trigger: "tst"
+    replace: "The employee is a hard working and dedicated individual. \nHe is always punctual and completes his work on time. \nHe is a team player and is always willing to help others. \nHe is a quick learner and is always eager to learn new things.\nWe are happy to have him as a part of our team."
+  - type: Simple
+    trigger: ":lorem"
+    replace: "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Nullam nec purus."
 backend:
-  key_delay: 10
+  key_delay: 2
