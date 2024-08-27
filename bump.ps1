@@ -54,29 +54,19 @@ if ($local) {
 }
 $releaseMessage = "Release v$newVersion ($publishDate)"
 
-# build in release mode and move the binaries to the release folder
-# delete the release folder if it exists
+# Build in release mode and move the binaries to the release folder
 $releaseFolder = "./release"
 if (Test-Path $releaseFolder) {
     Remove-Item -Recurse -Force $releaseFolder
 }
-# create a release folder if it doesn't exist
-if (-not (Test-Path $releaseFolder)) {
-    New-Item -ItemType Directory -Path $releaseFolder | Out-Null
-}
+New-Item -ItemType Directory -Path $releaseFolder | Out-Null
 
-# build for windows
-cargo build --release  --target x86_64-pc-windows-msvc # --artifact-dir $releaseFolder
-Write-Output "🔨 Successfully built Windows binary "
-# build for linux
-# cargo build --release  --target x86_64-unknown-linux-gnu # --artifact-dir $releaseFolder
-# Write-Output "🔨 Successfully built Linux binary "
+# Build for Windows
+cargo build --release --target x86_64-pc-windows-msvc
+Write-Output "🔨 Successfully built Windows binary"
 
-# move the binaries to the release folder
+# Move the binaries to the release folder
 Move-Item -Path "./target/x86_64-pc-windows-msvc/release/textra.exe" -Destination $releaseFolder
-# Move-Item -Path "./target/x86_64-unknown-linux-gnu/release/textra" -Destination $releaseFolder
-
-
 
 # Add ALL files to git
 git add .
@@ -93,9 +83,6 @@ if ($local) {
     # Build for Windows
     cargo build --release --bin textra --target x86_64-pc-windows-msvc
 
-    # Build for Linux
-    # cargo build --release --bin textra --target x86_64-unknown-linux-gnu
-
     # Create a new release
     $releaseId = New-RandomGuid
     $releasePath = "releases/$releaseId"
@@ -104,7 +91,6 @@ if ($local) {
     # Copy Windows binary to release directory
     $windowsBinaryPath = "./target/x86_64-pc-windows-msvc/release/textra.exe"
     Copy-Item -Path $windowsBinaryPath -Destination "$releasePath/textra-windows.exe"
- 
 
     Write-Output "🎉 Release v$newVersion completed locally! Binaries are available in $releasePath"
     exit 0
@@ -114,20 +100,13 @@ if ($local) {
 Write-Output "🎉 Pushing changes and tags to the repository..."
 git push && git push --tags
 
-# Check if CARGO_TOKEN is available
-$cargoToken = $env:CARGO_TOKEN
-if (-not $cargoToken) {
-    Write-Output "⚠️ CARGO_TOKEN not found in environment variables. Skipping publishing to crates.io."
+# Publish the package to crates.io directly
+Write-Output "📦 Attempting to publish package to crates.io..."
+cargo publish
+if ($LASTEXITCODE -eq 0) {
+    Write-Output "✨ Package successfully published to crates.io!"
 } else {
-    # Publish the package to crates.io
-    Write-Output "📦 Publishing package to crates.io..."
-    cargo publish
-    if ($LASTEXITCODE -eq 0) {
-        Write-Output "✨ Package successfully published to crates.io!"
-    } else {
-        Write-Output "❌ Failed to publish package to crates.io."
-        Write-Output "Please check the output above for more details."
-    }
+    Write-Host "❌ Failed to publish package to crates.io. We did not update the crate." -ForegroundColor Red
 }
 
 Write-Output "🎉 Release v$newVersion completed!"
