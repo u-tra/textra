@@ -308,7 +308,11 @@ fn set_autostart(install_path: &Path) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
     let (key, _) = hkcu.create_subkey(path)?;
-    key.set_value("Textra", &install_path.to_string_lossy().to_string())?;
+    let command = format!(
+        "cmd /C start /min \"\" \"{}\"",
+        install_path.to_string_lossy()
+    );
+    key.set_value("Textra", &command)?;
     showln!(
         gray_dim,
         "registered ",
