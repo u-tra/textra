@@ -1,19 +1,12 @@
 matches:
-  - trigger: btw
-    replacement:
-      type: Static
-      text: by the way
-      propagate_case: false
-  - trigger: :date
-    replacement:
-      type: Dynamic
-      action: "{{date}}"
-  - trigger: tst
-    replacement:
-      type: Static
-      text: |-
-        lorem ipsum dolor sit amet consectetur adipiscing elit
-         sed do eiusmod tempor incididunt ut labore et dolore magna aliqua
-      propagate_case: false
+- trigger: btw
+  replacement:
+    type: Static
+    text: by the way
+    propagate_case: false
+- trigger: date
+  replacement:
+    type: Dynamic
+    action: '{{date}}'
 backend:
   key_delay: 10

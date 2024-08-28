@@ -295,7 +295,7 @@ fn add_to_path(install_dir: &Path) -> Result<()> {
         yellow_bold,
         "textra",
         gray_dim,
-        "to the ",
+        " to the ",
         green_bold,
         "PATH",
         gray_dim,
@@ -313,7 +313,7 @@ fn set_autostart(install_path: &Path) -> Result<()> {
         gray_dim,
         "registered ",
         yellow_bold,
-        "textra",
+        "textra ",
         gray_dim,
         "for ",
         green_bold,
@@ -410,21 +410,18 @@ fn get_config_path() -> Result<PathBuf> {
         return Ok(config_file);
     }
 
-    if let Some(home_dir) = dirs::document_dir() {
-        let home_config_dir = home_dir.join("textra");
-        let home_config_file = home_config_dir.join("config.yaml");
-        if home_config_file.exists() {
-            return Ok(home_config_file);
-        }
+    let home_dir = dirs::document_dir().unwrap();
+    let home_config_dir = home_dir.join("textra");
+    let home_config_file = home_config_dir.join("config.yaml");
+
+    if home_config_file.exists() {
+        return Ok(home_config_file);
     }
 
-    let new_config_dir = current_dir.join("textra");
-    fs::create_dir_all(&new_config_dir).context("Failed to create config directory")?;
-    let new_config_dir = current_dir.join("textra");
-    fs::create_dir_all(&new_config_dir).context("Failed to create config directory")?;
-    let new_config_file = new_config_dir.join("config.yaml");
-    create_default_config(&new_config_file)?;
-    Ok(new_config_file)
+    fs::create_dir_all(&home_config_dir).context("Failed to create config directory")?;
+    let home_config_file = home_config_dir.join("config.yaml");
+    create_default_config(&home_config_file)?;
+    Ok(home_config_file)
 }
 
 fn create_default_config(path: &Path) -> Result<()> {
