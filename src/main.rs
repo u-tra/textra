@@ -2,15 +2,16 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dirs;
-use minimo::showln;
+use minimo::{showln, yellow_bold};
 use parking_lot::Mutex;
 use regex::Regex;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
-use std::ffi::c_int;
+use std::collections::HashMap;
+use std::ffi::{c_int, OsString};
 use std::io::Write;
 use std::mem::MaybeUninit;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::process::Command;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, mem, ptr, thread};
@@ -24,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use winapi::shared::minwindef::{DWORD, FALSE, LPARAM, LPDWORD, LPVOID, LRESULT, WPARAM};
 use winapi::shared::windef::HWND;
 use winapi::um::fileapi::*;
@@ -35,7 +37,6 @@ use winapi::um::winnt::{
     FILE_SHARE_WRITE, HANDLE,
 };
 use winapi::um::winuser::*;
-use once_cell::sync::Lazy;
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone)]
 struct Config {
@@ -45,22 +46,20 @@ struct Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+struct Match {
+    trigger: String,
+    replacement: Replacement,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(tag = "type")]
-enum Match {
-    Simple {
-        trigger: String,
-        replace: String,
+enum Replacement {
+    Static {
+        text: String,
         #[serde(default)]
         propagate_case: bool,
-        #[serde(default)]
-        word: bool,
-    },
-    Regex {
-        pattern: String,
-        replace: String,
     },
     Dynamic {
-        trigger: String,
         action: String,
     },
 }
@@ -73,6 +72,22 @@ struct BackendConfig {
 
 fn default_key_delay() -> u64 {
     10
+}
+
+lazy_static::lazy_static! {
+    static ref GENERATING: AtomicBool = AtomicBool::new(false);
+}
+
+fn block_listener() {
+    GENERATING.store(true, Ordering::SeqCst);
+}
+
+fn unblock_listener() {
+    GENERATING.store(false, Ordering::SeqCst);
+}
+
+fn listener_is_blocked() -> bool {
+    GENERATING.load(Ordering::SeqCst)
 }
 
 struct AppState {
@@ -145,7 +160,7 @@ fn main() -> Result<()> {
 }
 
 fn install() -> Result<()> {
-    println!("Installing Textra...");
+    showln!(yellow_bold, "installing textra...");
 
     let exe_path = env::current_exe()?;
     let install_dir = dirs::data_local_dir().unwrap().join("Textra");
@@ -158,13 +173,20 @@ fn install() -> Result<()> {
     create_uninstaller(&install_dir)?;
     start_background(&install_path)?;
 
-    println!("Textra has been installed and started. It will run automatically at startup.");
-    println!("To uninstall, run 'textra uninstall'.");
+    showln!(green_bold, "textra have been successfully installed");
+    showln!(
+        gray_dim,
+        "to uninstall textra, run ",
+        yellow_bold,
+        "textra uninstall",
+        gray_dim,
+        " in the terminal"
+    );
     Ok(())
 }
 
 fn uninstall() -> Result<()> {
-    println!("Uninstalling Textra...");
+    showln!(yellow_bold, "uninstalling textra...");
 
     stop_running_instance()?;
     remove_from_path()?;
@@ -173,7 +195,7 @@ fn uninstall() -> Result<()> {
     let install_dir = dirs::data_local_dir().unwrap().join("Textra");
     fs::remove_dir_all(&install_dir)?;
 
-    println!("Textra has been uninstalled successfully.");
+    showln!(orange_bold, "textra have been uninstalled");
     Ok(())
 }
 
@@ -347,12 +369,9 @@ fn load_config() -> Result<Config> {
     minimo::showln!(yellow_bold, "│ ", green_bold, config_path.display());
     if !config.matches.is_empty() {
         for match_rule in &config.matches {
-            let (trigger, replace) = match match_rule {
-                Match::Simple {
-                    trigger, replace, ..
-                } => (trigger, replace),
-                Match::Regex { pattern, replace } => (pattern, replace),
-                Match::Dynamic { trigger, action } => (trigger, action),
+            let (trigger, replace) = match &match_rule.replacement {
+                Replacement::Static { text, .. } => (&match_rule.trigger, text),
+                Replacement::Dynamic { action } => (&match_rule.trigger, action),
             };
             let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
 
@@ -401,6 +420,8 @@ fn get_config_path() -> Result<PathBuf> {
 
     let new_config_dir = current_dir.join("textra");
     fs::create_dir_all(&new_config_dir).context("Failed to create config directory")?;
+    let new_config_dir = current_dir.join("textra");
+    fs::create_dir_all(&new_config_dir).context("Failed to create config directory")?;
     let new_config_file = new_config_dir.join("config.yaml");
     create_default_config(&new_config_file)?;
     Ok(new_config_file)
@@ -409,412 +430,453 @@ fn get_config_path() -> Result<PathBuf> {
 fn create_default_config(path: &Path) -> Result<()> {
     let default_config = Config {
         matches: vec![
-            Match::Simple {
+            Match {
                 trigger: "btw".to_string(),
-                replace: "by the way".to_string(),
-                propagate_case: false,
-                word: false,
+                replacement: Replacement::Static {
+                    text: "by the way".to_string(),
+                    propagate_case: false,
+                },
             },
-            Match::Dynamic {
-                trigger: ":date".to_string(),
-                action: "{{date}}".to_string(),
+            Match {
+                trigger: "date".to_string(),
+                replacement: Replacement::Dynamic {
+                    action: "{{date}}".to_string(),
+                },
             },
         ],
-        backend: BackendConfig { key_delay: 10 },};
-        let yaml = serde_yaml::to_string(&default_config)?;
-        fs::write(path, yaml).context("Failed to write default config file")?;
-        Ok(())
-    }
-    
-    fn watch_config(sender: Sender<Message>) -> Result<()> {
-        let config_path = get_config_path()?;
-        let config_dir = config_path.parent().unwrap();
-    
-        unsafe {
-            let dir_handle = CreateFileW(
-                config_dir
-                    .as_os_str()
-                    .encode_wide()
-                    .chain(Some(0))
-                    .collect::<Vec<_>>()
-                    .as_ptr(),
-                FILE_LIST_DIRECTORY,
-                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                ptr::null_mut(),
-                OPEN_EXISTING,
-                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-                ptr::null_mut(),
+        backend: BackendConfig { key_delay: 10 },
+    };
+    let yaml = serde_yaml::to_string(&default_config)?;
+    fs::write(path, yaml).context("Failed to write default config file")?;
+    Ok(())
+}
+
+fn watch_config(sender: Sender<Message>) -> Result<()> {
+    let config_path = get_config_path()?;
+    let config_dir = config_path.parent().unwrap();
+
+    unsafe {
+        let dir_handle = CreateFileW(
+            config_dir
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect::<Vec<_>>()
+                .as_ptr(),
+            FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+            ptr::null_mut(),
+        );
+
+        if dir_handle == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let mut buffer = [0u8; 1024];
+        let mut bytes_returned: DWORD = 0;
+        let mut overlapped: OVERLAPPED = mem::zeroed();
+
+        loop {
+            let result = ReadDirectoryChangesW(
+                dir_handle,
+                buffer.as_mut_ptr() as LPVOID,
+                buffer.len() as DWORD,
+                FALSE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE,
+                &mut bytes_returned,
+                &mut overlapped,
+                None,
             );
-    
-            if dir_handle == INVALID_HANDLE_VALUE {
+
+            if result == 0 {
                 return Err(io::Error::last_os_error().into());
             }
-    
-            let mut buffer = [0u8; 1024];
-            let mut bytes_returned: DWORD = 0;
-            let mut overlapped: OVERLAPPED = mem::zeroed();
-    
-            loop {
-                let result = ReadDirectoryChangesW(
-                    dir_handle,
-                    buffer.as_mut_ptr() as LPVOID,
-                    buffer.len() as DWORD,
-                    FALSE,
-                    FILE_NOTIFY_CHANGE_LAST_WRITE,
-                    &mut bytes_returned,
-                    &mut overlapped,
-                    None,
-                );
-    
-                if result == 0 {
-                    return Err(io::Error::last_os_error().into());
-                }
-    
-                let event = WaitForSingleObject(dir_handle, INFINITE);
-                if event != WAIT_OBJECT_0 {
-                    return Err(io::Error::last_os_error().into());
-                }
-    
-                sender.send(Message::ConfigReload).unwrap();
-            }
-        }
-    }
-    
-    static GLOBAL_SENDER: Lazy<Mutex<Option<Sender<Message>>>> = Lazy::new(|| Mutex::new(None));
-    
-    fn set_global_sender(sender: Sender<Message>) {
-        let mut global_sender = GLOBAL_SENDER.lock();
-        *global_sender = Some(sender);
-    }
-    
-    unsafe extern "system" fn keyboard_hook_proc(
-        code: i32,
-        w_param: WPARAM,
-        l_param: LPARAM,
-    ) -> LRESULT {
-        if code >= 0 {
-            let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
-            let vk_code = kb_struct.vkCode;
-    
-            if let Some(sender) = GLOBAL_SENDER.lock().as_ref() {
-                // Use try_send to avoid blocking
-                let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
-            }
-        }
-    
-        CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
-    }
-    
-    fn listen_keyboard(sender: Sender<Message>) -> Result<()> {
-        set_global_sender(sender);
-    
-        unsafe {
-            let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
-    
-            if hook.is_null() {
+
+            let event = WaitForSingleObject(dir_handle, INFINITE);
+            if event != WAIT_OBJECT_0 {
                 return Err(io::Error::last_os_error().into());
             }
-    
-            let mut msg: MSG = mem::zeroed();
-            while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
-                TranslateMessage(&msg);
-                DispatchMessageA(&msg);
-            }
-    
-            UnhookWindowsHookEx(hook);
+
+            sender.send(Message::ConfigReload).unwrap();
         }
-    
-        Ok(())
     }
-    
-    fn handle_key_event(
-        app_state: Arc<AppState>,
-        vk_code: DWORD,
-        w_param: WPARAM,
-        l_param: LPARAM,
-    ) -> Result<()> {
-        let now = Instant::now();
-    
-        match w_param as u32 {
-            WM_KEYDOWN | WM_SYSKEYDOWN => {
-                let mut last_key_time = app_state.last_key_time.lock();
-                if now.duration_since(*last_key_time) > Duration::from_millis(500) {
-                    app_state.current_text.lock().remove(..);
-                }
-                *last_key_time = now;
-    
-                match vk_code as i32 {
-                    VK_ESCAPE => {
-                        app_state.killswitch.store(true, Ordering::SeqCst);
-                    }
-                    VK_SHIFT => {
-                        app_state.shift_pressed.store(true, Ordering::SeqCst);
-                    }
-                    VK_CAPITAL => {
-                        let current = app_state.caps_lock_on.load(Ordering::SeqCst);
-                        app_state.caps_lock_on.store(!current, Ordering::SeqCst);
-                    }
-                    _ => {
-                        if let Some(c) = vk_code_to_char(
-                            vk_code as i32,
-                            app_state.shift_pressed.load(Ordering::SeqCst),
-                            app_state.caps_lock_on.load(Ordering::SeqCst),
-                        ) {
-                            let mut current_text = app_state.current_text.lock();
-                            let txtlen = current_text.len_chars();
-                            current_text.insert(txtlen, &c.to_string());
-                            check_and_replace(&app_state, &mut current_text)?;
-                        }
-                    }
-                }
+}
+
+static GLOBAL_SENDER: Lazy<Mutex<Option<Sender<Message>>>> = Lazy::new(|| Mutex::new(None));
+
+fn set_global_sender(sender: Sender<Message>) {
+    let mut global_sender = GLOBAL_SENDER.lock();
+    *global_sender = Some(sender);
+}
+
+unsafe extern "system" fn keyboard_hook_proc(
+    code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if code >= 0 && !listener_is_blocked() {
+        let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
+        let vk_code = kb_struct.vkCode;
+
+        if let Some(sender) = GLOBAL_SENDER.lock().as_ref() {
+            let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
+        }
+    }
+
+    CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
+}
+
+fn listen_keyboard(sender: Sender<Message>) -> Result<()> {
+    set_global_sender(sender);
+
+    unsafe {
+        let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
+
+        if hook.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+
+        let mut msg: MSG = mem::zeroed();
+        while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+
+        UnhookWindowsHookEx(hook);
+    }
+
+    Ok(())
+}
+
+lazy_static::lazy_static! {
+    static ref SYMBOL_PAIRS: HashMap<char, char> = {
+        let mut m = HashMap::new();
+        m.insert(';', ':');
+        m.insert(',', '<');
+        m.insert('.', '>');
+        m.insert('/', '?');
+        m.insert('\'', '"');
+        m.insert('[', '{');
+        m.insert(']', '}');
+        m.insert('\\', '|');
+        m.insert('`', '~');
+        m.insert('1', '!');
+        m.insert('2', '@');
+        m.insert('3', '#');
+        m.insert('4', '$');
+        m.insert('5', '%');
+        m.insert('6', '^');
+        m.insert('7', '&');
+        m.insert('8', '*');
+        m.insert('9', '(');
+        m.insert('0', ')');
+        m.insert('-', '_');
+        m.insert('=', '+');
+        m
+    };
+}
+
+fn handle_key_event(
+    app_state: Arc<AppState>,
+    vk_code: DWORD,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> Result<()> {
+    if listener_is_blocked() {
+        return Ok(());
+    }
+    let now = Instant::now();
+
+    match w_param as u32 {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let mut last_key_time = app_state.last_key_time.lock();
+            if now.duration_since(*last_key_time) > Duration::from_millis(1000) {
+                app_state.current_text.lock().remove(..);
             }
-            WM_KEYUP | WM_SYSKEYUP => match vk_code as i32 {
-                VK_SHIFT => {
-                    app_state.shift_pressed.store(false, Ordering::SeqCst);
-                }
+            *last_key_time = now;
+
+            match vk_code as i32 {
                 VK_ESCAPE => {
-                    app_state.killswitch.store(false, Ordering::SeqCst);
+                    app_state.killswitch.store(true, Ordering::SeqCst);
                 }
-                _ => {}
-            },
+                VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
+                    app_state.shift_pressed.store(true, Ordering::SeqCst);
+                }
+                VK_CAPITAL => {
+                    let current = app_state.caps_lock_on.load(Ordering::SeqCst);
+                    app_state.caps_lock_on.store(!current, Ordering::SeqCst);
+                }
+                _ => {
+                    if let Some(c) = get_char_from_vk(
+                        vk_code as i32,
+                        app_state.shift_pressed.load(Ordering::SeqCst),
+                    ) {
+                        let mut current_text = app_state.current_text.lock();
+                        let txtlen = current_text.len_chars();
+                        current_text.insert(txtlen, &c.to_string());
+                        check_and_replace(&app_state, &mut current_text)?;
+                    }
+                }
+            }
+        }
+        WM_KEYUP | WM_SYSKEYUP => match vk_code as i32 {
+            VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
+                app_state.shift_pressed.store(false, Ordering::SeqCst);
+            }
+            VK_ESCAPE => {
+                app_state.killswitch.store(false, Ordering::SeqCst);
+            }
             _ => {}
-        }
-    
-        Ok(())
+        },
+        _ => {}
     }
-    
-    fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()> {
-        let immutable_current_text = current_text.to_string();
-        let config = app_state.config.lock();
-        for match_rule in &config.matches {
-            match match_rule {
-                Match::Simple {
-                    trigger,
-                    replace,
-                    propagate_case,
-                    word,
-                } => {
-                    if immutable_current_text.ends_with(trigger) {
-                        let start = immutable_current_text.len() - trigger.len();
-                        if !*word
-                            || (start == 0
-                                || !immutable_current_text
-                                    .chars()
-                                    .nth(start - 1)
-                                    .unwrap()
-                                    .is_alphanumeric())
-                        {
-                            perform_replacement(
-                                current_text,
-                                config.backend.key_delay,
-                                &immutable_current_text[start..],
-                                replace,
-                                *propagate_case,
-                                false,
-                                app_state,
-                            )?;
-                            return Ok(());
-                        }
-                    }
-                }
-                Match::Regex { pattern, replace } => {
-                    let regex = Regex::new(pattern)?;
-                    if let Some(captures) = regex.captures(&immutable_current_text) {
-                        let mut replacement = replace.clone();
-                        for (i, capture) in captures.iter().enumerate().skip(1) {
-                            if let Some(capture) = capture {
-                                replacement = replacement.replace(&format!("${}", i), capture.as_str());
-                            }
-                        }
-                        perform_replacement(
-                            current_text,
-                            config.backend.key_delay,
-                            &immutable_current_text,
-                            &replacement,
-                            false,
-                            false,
-                            app_state,
-                        )?;
-                        return Ok(());
-                    }
-                }
-                Match::Dynamic { trigger, action } => {
-                    if immutable_current_text.ends_with(trigger) {
-                        let replacement = process_dynamic_replacement(action);
-                        perform_replacement(
-                            current_text,
-                            config.backend.key_delay,
-                            trigger,
-                            &replacement,
-                            false,
-                            true,
-                            app_state,
-                        )?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-    
-    fn perform_replacement(
-        current_text: &mut Rope,
-        key_delay: u64,
-        original: &str,
-        replacement: &str,
-        propagate_case: bool,
-        dynamic: bool,
-        app_state: &AppState,
-    ) -> Result<()> {
-        let final_replacement = if dynamic {
-            process_dynamic_replacement(replacement)
-        } else if propagate_case {
-            propagate_case_fn(original, replacement)
-        } else {
-            replacement.to_string()
-        };
-    
-        if app_state.killswitch.load(Ordering::SeqCst) {
-            return Ok(());
-        }
-    
-        // Backspace the original text
-        let backspace_count = original.chars().count();
-        let backspaces = vec![VK_BACK; backspace_count];
-        simulate_key_presses(&backspaces, key_delay);
-    
-        // Type the replacement
-        let vk_codes = string_to_vk_codes(&final_replacement);
-        simulate_key_presses(&vk_codes, key_delay);
-    
-        let start = current_text.len_chars() - original.len();
-        current_text.remove(start..current_text.len_chars());
-        current_text.insert(start, &final_replacement);
-        Ok(())
-    }
-    
-    fn string_to_vk_codes(s: &str) -> Vec<i32> {
-        s.chars().map(|c| char_to_vk_code(c)).collect()
-    }
-    
-    fn char_to_vk_code(c: char) -> i32 {
-        unsafe { VkKeyScanW(c as u16) as i32 }
-    }
-    
-    fn process_dynamic_replacement(replacement: &str) -> String {
-        match replacement.to_lowercase().as_str() {
-            "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
-            _ => replacement.to_string(),
-        }
-    }
-    
-    fn propagate_case_fn(original: &str, replacement: &str) -> String {
-        if original.chars().all(|c| c.is_uppercase()) {
-            replacement.to_uppercase()
-        } else if original.chars().next().map_or(false, |c| c.is_uppercase()) {
-            let mut chars = replacement.chars();
-            match chars.next() {
-                None => String::new(),
-                Some(first_char) => first_char.to_uppercase().collect::<String>() + chars.as_str(),
-            }
-        } else {
-            replacement.to_string()
-        }
-    }
-    
-    fn reload_config(app_state: Arc<AppState>) -> Result<()> {
-        let mut config = app_state.config.lock();
-        *config = load_config()?;
-        Ok(())
-    }
-    
-    fn vk_code_to_char(vk_code: i32, shift_pressed: bool, caps_lock_on: bool) -> Option<char> {
-        let mut keyboard_state = [0u8; 256];
+
+    Ok(())
+}
+
+fn get_char_from_vk(vk_code: i32, shift_pressed: bool) -> Option<char> {
+    unsafe {
+        let mut keyboard_state: [u8; 256] = std::mem::zeroed();
         if shift_pressed {
             keyboard_state[VK_SHIFT as usize] = 0x80;
         }
-        if caps_lock_on {
-            keyboard_state[VK_CAPITAL as usize] = 0x01;
-        }
-    
-        let mut unicode_chars = [0u16; 2];
-        let result = unsafe {
-            ToUnicodeEx(
-                vk_code as u32,
-                MapVirtualKeyA(vk_code as u32, MAPVK_VK_TO_VSC) as u32,
-                keyboard_state.as_ptr(),
-                unicode_chars.as_mut_ptr(),
-                unicode_chars.len() as i32,
-                0,
-                ptr::null_mut(),
-            )
-        };
-    
-        if result == 1 || result == 2 {
-            char::from_u32(unicode_chars[0] as u32)
+        GetKeyboardState(keyboard_state.as_mut_ptr());
+
+        let scan_code =
+            MapVirtualKeyExW(vk_code as u32, MAPVK_VK_TO_VSC_EX, ptr::null_mut()) as u16;
+        let mut char_buffer: [u16; 2] = [0; 2];
+
+        let result = ToUnicodeEx(
+            vk_code as u32,
+            scan_code as u32,
+            keyboard_state.as_ptr(),
+            char_buffer.as_mut_ptr(),
+            2,
+            0,
+            GetKeyboardLayout(0),
+        );
+
+        if result == 1 {
+            let c = char::from_u32(char_buffer[0] as u32)?;
+            if shift_pressed {
+                SYMBOL_PAIRS.get(&c).cloned().or(Some(c))
+            } else {
+                Some(c)
+            }
         } else {
-            // Handle special cases for punctuation and symbols
-            match vk_code {
-                VK_OEM_1 => Some(if shift_pressed { ':' } else { ';' }),
-                VK_OEM_PLUS => Some(if shift_pressed { '+' } else { '=' }),
-                VK_OEM_COMMA => Some(if shift_pressed { '<' } else { ',' }),
-                VK_OEM_MINUS => Some(if shift_pressed { '_' } else { '-' }),
-                VK_OEM_PERIOD => Some(if shift_pressed { '>' } else { '.' }),
-                VK_OEM_2 => Some(if shift_pressed { '?' } else { '/' }),
-                VK_OEM_3 => Some(if shift_pressed { '~' } else { '`' }),
-                VK_OEM_4 => Some(if shift_pressed { '{' } else { '[' }),
-                VK_OEM_5 => Some(if shift_pressed { '|' } else { '\\' }),
-                VK_OEM_6 => Some(if shift_pressed { '}' } else { ']' }),
-                VK_OEM_7 => Some(if shift_pressed { '"' } else { '\'' }),
-                _ => None,
+            None
+        }
+    }
+}
+
+fn string_to_vk_codes(s: &str) -> Vec<i32> {
+    s.chars().map(|c| char_to_vk_code(c)).collect()
+}
+
+fn char_to_vk_code(c: char) -> i32 {
+    let vk_code = unsafe { VkKeyScanW(c as u16) as i32 };
+    let low_byte = vk_code & 0xFF;
+    let high_byte = (vk_code >> 8) & 0xFF;
+
+    if high_byte & 1 != 0 {
+        // Shift is required
+        VK_SHIFT
+    } else {
+        low_byte
+    }
+}
+
+fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()> {
+    let immutable_current_text = current_text.to_string();
+    let config = app_state.config.lock();
+
+    for match_rule in &config.matches {
+        match &match_rule.replacement {
+            Replacement::Static {
+                text,
+                propagate_case,
+            } => {
+                if immutable_current_text.ends_with(&match_rule.trigger) {
+                    let start = immutable_current_text.len() - match_rule.trigger.len();
+
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        &immutable_current_text[start..],
+                        text,
+                        *propagate_case,
+                        false,
+                        app_state,
+                    )?;
+
+                    return Ok(());
+                }
+            }
+            Replacement::Dynamic { action } => {
+                if immutable_current_text.ends_with(&match_rule.trigger) {
+                    let replacement = process_dynamic_replacement(action);
+
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        &match_rule.trigger,
+                        &replacement,
+                        false,
+                        true,
+                        app_state,
+                    )?;
+
+                    return Ok(());
+                }
+            }
+        }
+
+        if match_rule.trigger.starts_with("regex") && match_rule.trigger.len() > 6 {
+            let regex = Regex::new(&match_rule.trigger[5..]).unwrap();
+            if let Some(captures) = regex.captures(&immutable_current_text) {
+                let replacement = match &match_rule.replacement {
+                    Replacement::Static { text, .. } => text.clone(),
+                    Replacement::Dynamic { action } => process_dynamic_replacement(action),
+                };
+                let mut final_replacement = replacement.clone();
+                for (i, capture) in captures.iter().enumerate().skip(1) {
+                    if let Some(capture) = capture {
+                        final_replacement =
+                            final_replacement.replace(&format!("${}", i), capture.as_str());
+                    }
+                }
+                perform_replacement(
+                    current_text,
+                    config.backend.key_delay,
+                    &immutable_current_text,
+                    &final_replacement,
+                    false,
+                    false,
+                    app_state,
+                )?;
+                return Ok(());
             }
         }
     }
-    
-    fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
-        let batch_size = 20;
-        let delay = Duration::from_millis(key_delay);
-        let input_count = vk_codes.len() * 2;
-        let mut inputs: Vec<MaybeUninit<INPUT>> = Vec::with_capacity(input_count);
-    
-        // Pre-allocate the entire vector
-        unsafe { inputs.set_len(input_count) };
-    
-        // Fill the vector without initializing
-        for (i, &vk) in vk_codes.iter().enumerate() {
-            let press_index = i * 2;
-            let release_index = press_index + 1;
-    
-            // Key press event
-            unsafe {
-                let input = inputs[press_index].as_mut_ptr();
-                (*input).type_ = INPUT_KEYBOARD;
-                let ki = (*input).u.ki_mut();
-                ki.wVk = vk as u16;
-                ki.dwFlags = 0;
-            }
-    
-            // Key release event
-            unsafe {
-                let input = inputs[release_index].as_mut_ptr();
-                (*input).type_ = INPUT_KEYBOARD;
-                let ki = (*input).u.ki_mut();
-                ki.wVk = vk as u16;
-                ki.dwFlags = KEYEVENTF_KEYUP;
-            }
+    Ok(())
+}
+
+fn perform_replacement(
+    current_text: &mut Rope,
+    key_delay: u64,
+    original: &str,
+    replacement: &str,
+    propagate_case: bool,
+    dynamic: bool,
+    app_state: &AppState,
+) -> Result<()> {
+    let final_replacement = if dynamic {
+        process_dynamic_replacement(replacement)
+    } else if propagate_case {
+        propagate_case_fn(original, replacement)
+    } else {
+        replacement.to_string()
+    };
+
+    if app_state.killswitch.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // Block the listener before simulating key presses
+    block_listener();
+
+    // Backspace the original text
+    let backspace_count = original.chars().count();
+    let backspaces = vec![VK_BACK; backspace_count];
+    simulate_key_presses(&backspaces, key_delay);
+
+    // Type the replacement
+    let vk_codes = string_to_vk_codes(&final_replacement);
+    simulate_key_presses(&vk_codes, key_delay);
+
+    // Unblock the listener after simulating key presses
+    unblock_listener();
+
+    let start = current_text.len_chars() - original.len();
+    current_text.remove(start..current_text.len_chars());
+    current_text.insert(start, &final_replacement);
+
+    Ok(())
+}
+
+fn process_dynamic_replacement(replacement: &str) -> String {
+    match replacement.to_lowercase().as_str() {
+        "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
+        _ => replacement.to_string(),
+    }
+}
+
+fn propagate_case_fn(original: &str, replacement: &str) -> String {
+    if original.chars().all(|c| c.is_uppercase()) {
+        replacement.to_uppercase()
+    } else if original.chars().next().map_or(false, |c| c.is_uppercase()) {
+        let mut chars = replacement.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(first_char) => first_char.to_uppercase().collect::<String>() + chars.as_str(),
         }
-    
-        // Send inputs in batches
-        for chunk in inputs.chunks(batch_size * 2) {
-            unsafe {
-                SendInput(
-                    chunk.len() as u32,
-                    chunk.as_ptr() as *mut INPUT,
-                    size_of::<INPUT>() as c_int,
-                );
-            }
-            // Add a small delay between batches for more natural input
-            thread::sleep(delay);
+    } else {
+        replacement.to_string()
+    }
+}
+
+fn reload_config(app_state: Arc<AppState>) -> Result<()> {
+    let mut config = app_state.config.lock();
+    *config = load_config()?;
+    Ok(())
+}
+
+fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
+    let batch_size = 20;
+    let delay = Duration::from_millis(key_delay);
+    let input_count = vk_codes.len() * 2;
+    let mut inputs: Vec<MaybeUninit<INPUT>> = Vec::with_capacity(input_count);
+
+    // Pre-allocate the entire vector
+    unsafe { inputs.set_len(input_count) };
+
+    // Fill the vector without initializing
+    for (i, &vk) in vk_codes.iter().enumerate() {
+        let press_index = i * 2;
+        let release_index = press_index + 1;
+
+        // Key press event
+        unsafe {
+            let input = inputs[press_index].as_mut_ptr();
+            (*input).type_ = INPUT_KEYBOARD;
+            let ki = (*input).u.ki_mut();
+            ki.wVk = vk as u16;
+            ki.dwFlags = 0;
+        }
+
+        // Key release event
+        unsafe {
+            let input = inputs[release_index].as_mut_ptr();
+            (*input).type_ = INPUT_KEYBOARD;
+            let ki = (*input).u.ki_mut();
+            ki.wVk = vk as u16;
+            ki.dwFlags = KEYEVENTF_KEYUP;
         }
     }
+
+    // Send inputs in batches
+    for chunk in inputs.chunks(batch_size * 2) {
+        unsafe {
+            SendInput(
+                chunk.len() as u32,
+                chunk.as_ptr() as *mut INPUT,
+                std::mem::size_of::<INPUT>() as c_int,
+            );
+        }
+        // Add a small delay between batches for more natural input
+        thread::sleep(delay);
+    }
+}
