@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use chrono::Local;
+use config::{Config, Message, Replacement, GLOBAL_SENDER};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dirs;
 use minimo::{showln, yellow_bold};
@@ -38,42 +39,6 @@ use winapi::um::winnt::{
 };
 use winapi::um::winuser::*;
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-struct Config {
-    matches: Vec<Match>,
-    #[serde(default)]
-    backend: BackendConfig,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-struct Match {
-    trigger: String,
-    replacement: Replacement,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(tag = "type")]
-enum Replacement {
-    Static {
-        text: String,
-        #[serde(default)]
-        propagate_case: bool,
-    },
-    Dynamic {
-        action: String,
-    },
-}
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-struct BackendConfig {
-    #[serde(default = "default_key_delay")]
-    key_delay: u64,
-}
-
-fn default_key_delay() -> u64 {
-    10
-}
-
 lazy_static::lazy_static! {
     static ref GENERATING: AtomicBool = AtomicBool::new(false);
 }
@@ -101,9 +66,9 @@ struct AppState {
 
 impl AppState {
     fn new() -> Result<Self> {
-        let config = load_config().unwrap_or_else(|e| {
+        let config = config::load_config().unwrap_or_else(|e| {
             eprintln!("Error loading config: {}", e);
-            Config::default()
+            config::Config::default()
         });
 
         Ok(Self {
@@ -117,19 +82,14 @@ impl AppState {
     }
 }
 
-enum Message {
-    KeyEvent(DWORD, WPARAM, LPARAM),
-    ConfigReload,
-    Quit,
-}
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() > 1 {
         match args[1].as_str() {
-            "install" => return install(),
-            "uninstall" => return uninstall(),
+            "install" => return installer::install(),
+            "uninstall" => return installer::uninstall(),
             _ => {
                 eprintln!("Unknown command. Use 'install' or 'uninstall'.");
                 return Ok(());
@@ -142,7 +102,7 @@ fn main() -> Result<()> {
 
     let config_watcher = thread::spawn({
         let sender = sender.clone();
-        move || watch_config(sender)
+        move || config::watch_config(sender)
     });
 
     let keyboard_listener = thread::spawn({
@@ -159,180 +119,391 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn install() -> Result<()> {
-    showln!(yellow_bold, "installing textra...");
+mod installer {
+    use super::*;
 
-    let exe_path = env::current_exe()?;
-    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
-    fs::create_dir_all(&install_dir)?;
-    let install_path = install_dir.join("textra.exe");
-    fs::copy(&exe_path, &install_path)?;
+    pub fn install() -> Result<()> {
+        showln!(yellow_bold, "installing textra...");
 
-    add_to_path(&install_dir)?;
-    set_autostart(&install_path)?;
-    create_uninstaller(&install_dir)?;
-    start_background(&install_path)?;
+        let exe_path = env::current_exe()?;
+        let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+        fs::create_dir_all(&install_dir)?;
+        let install_path = install_dir.join("textra.exe");
+        fs::copy(&exe_path, &install_path)?;
 
-    showln!(green_bold, "textra have been successfully installed");
-    showln!(
-        gray_dim,
-        "to uninstall textra, run ",
-        yellow_bold,
-        "textra uninstall",
-        gray_dim,
-        " in the terminal"
-    );
-    Ok(())
-}
+        add_to_path(&install_dir)?;
+        set_autostart(&install_path)?;
+        create_uninstaller(&install_dir)?;
+        start_background(&install_path)?;
 
-fn uninstall() -> Result<()> {
-    showln!(yellow_bold, "uninstalling textra...");
-
-    stop_running_instance()?;
-    remove_from_path()?;
-    remove_autostart()?;
-
-    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
-    fs::remove_dir_all(&install_dir)?;
-
-    showln!(orange_bold, "textra have been uninstalled");
-    Ok(())
-}
-
-fn create_uninstaller(install_dir: &Path) -> Result<()> {
-    let uninstaller_path = install_dir.join("uninstall.bat");
-    let uninstaller_content = format!(
-        "@echo off\n\
-        taskkill /F /IM textra.exe\n\
-        \"{0}\" uninstall\n\
-        rmdir /S /Q \"{1}\"\n",
-        install_dir.join("textra.exe").display(),
-        install_dir.display()
-    );
-    fs::write(uninstaller_path, uninstaller_content)?;
-    Ok(())
-}
-
-fn stop_running_instance() -> Result<()> {
-    Command::new("taskkill")
-        .args(&["/F", "/IM", "textra.exe"])
-        .output()?;
-    Ok(())
-}
-
-fn remove_from_path() -> Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu.create_subkey("Environment")?;
-    let path: String = env.get_value("PATH")?;
-    let install_dir = dirs::data_local_dir().unwrap().join("Textra");
-    let new_path: Vec<&str> = path
-        .split(';')
-        .filter(|&p| p != install_dir.to_str().unwrap())
-        .collect();
-    let new_path = new_path.join(";");
-    env.set_value("PATH", &new_path)?;
-
-    unsafe {
-        SendMessageTimeoutA(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0 as WPARAM,
-            "Environment\0".as_ptr() as LPARAM,
-            SMTO_ABORTIFHUNG,
-            5000,
-            ptr::null_mut(),
+        showln!(green_bold, "textra have been successfully installed");
+        showln!(
+            gray_dim,
+            "to uninstall textra, run ",
+            yellow_bold,
+            "textra uninstall",
+            gray_dim,
+            " in the terminal"
         );
+        Ok(())
     }
-    showln!(
-        gray_dim,
-        "removed ",
-        yellow_bold,
-        "PATH",
-        gray_dim,
-        " entry"
-    );
 
-    Ok(())
-}
+    pub fn uninstall() -> Result<()> {
+        showln!(yellow_bold, "uninstalling textra...");
 
-fn remove_autostart() -> Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let (key, _) = hkcu.create_subkey(path)?;
-    key.delete_value("Textra")?;
-    showln!(
-        gray_dim,
-        "removed ",
-        yellow_bold,
-        "autostart",
-        gray_dim,
-        " entry"
-    );
-    Ok(())
-}
+        stop_running_instance()?;
+        remove_from_path()?;
+        remove_autostart()?;
 
-fn add_to_path(install_dir: &Path) -> Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let (env, _) = hkcu.create_subkey("Environment")?;
-    let path: String = env.get_value("PATH")?;
-    let new_path = format!("{};{}", path, install_dir.to_string_lossy());
-    env.set_value("PATH", &new_path)?;
+        let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+        fs::remove_dir_all(&install_dir)?;
 
-    unsafe {
-        SendMessageTimeoutA(
-            HWND_BROADCAST,
-            WM_SETTINGCHANGE,
-            0 as WPARAM,
-            "Environment\0".as_ptr() as LPARAM,
-            SMTO_ABORTIFHUNG,
-            5000,
-            ptr::null_mut(),
+        showln!(orange_bold, "textra have been uninstalled");
+        Ok(())
+    }
+
+    pub fn create_uninstaller(install_dir: &Path) -> Result<()> {
+        let uninstaller_path = install_dir.join("uninstall.bat");
+        let uninstaller_content = format!(
+            "@echo off\n\
+            taskkill /F /IM textra.exe\n\
+            \"{0}\" uninstall\n\
+            rmdir /S /Q \"{1}\"\n",
+            install_dir.join("textra.exe").display(),
+            install_dir.display()
         );
+        fs::write(uninstaller_path, uninstaller_content)?;
+        Ok(())
     }
-    showln!(
-        gray_dim,
-        "added ",
-        yellow_bold,
-        "textra",
-        gray_dim,
-        " to the ",
-        green_bold,
-        "PATH",
-        gray_dim,
-        " environment variable."
-    );
-    Ok(())
+
+    pub fn stop_running_instance() -> Result<()> {
+        Command::new("taskkill")
+            .args(&["/F", "/IM", "textra.exe"])
+            .output()?;
+        Ok(())
+    }
+
+    pub fn remove_from_path() -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (env, _) = hkcu.create_subkey("Environment")?;
+        let path: String = env.get_value("PATH")?;
+        let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+        let new_path: Vec<&str> = path
+            .split(';')
+            .filter(|&p| p != install_dir.to_str().unwrap())
+            .collect();
+        let new_path = new_path.join(";");
+        env.set_value("PATH", &new_path)?;
+
+        unsafe {
+            SendMessageTimeoutA(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0 as WPARAM,
+                "Environment\0".as_ptr() as LPARAM,
+                SMTO_ABORTIFHUNG,
+                5000,
+                ptr::null_mut(),
+            );
+        }
+        showln!(
+            gray_dim,
+            "removed ",
+            yellow_bold,
+            "PATH",
+            gray_dim,
+            " entry"
+        );
+
+        Ok(())
+    }
+
+    pub fn remove_autostart() -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let (key, _) = hkcu.create_subkey(path)?;
+        key.delete_value("Textra")?;
+        showln!(
+            gray_dim,
+            "removed ",
+            yellow_bold,
+            "autostart",
+            gray_dim,
+            " entry"
+        );
+        Ok(())
+    }
+
+    pub fn add_to_path(install_dir: &Path) -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (env, _) = hkcu.create_subkey("Environment")?;
+        let path: String = env.get_value("PATH")?;
+        let new_path = format!("{};{}", path, install_dir.to_string_lossy());
+        env.set_value("PATH", &new_path)?;
+
+        unsafe {
+            SendMessageTimeoutA(
+                HWND_BROADCAST,
+                WM_SETTINGCHANGE,
+                0 as WPARAM,
+                "Environment\0".as_ptr() as LPARAM,
+                SMTO_ABORTIFHUNG,
+                5000,
+                ptr::null_mut(),
+            );
+        }
+        showln!(
+            gray_dim,
+            "added ",
+            yellow_bold,
+            "textra",
+            gray_dim,
+            " to the ",
+            green_bold,
+            "PATH",
+            gray_dim,
+            " environment variable."
+        );
+        Ok(())
+    }
+
+    pub fn set_autostart(install_path: &Path) -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let (key, _) = hkcu.create_subkey(path)?;
+        let command = format!(
+            "cmd /C start /min \"\" \"{}\"",
+            install_path.to_string_lossy()
+        );
+        key.set_value("Textra", &command)?;
+        showln!(
+            gray_dim,
+            "registered ",
+            yellow_bold,
+            "textra ",
+            gray_dim,
+            "for ",
+            green_bold,
+            "autostart",
+            gray_dim,
+            " in the registry."
+        );
+        Ok(())
+    }
+
+    pub fn start_background(install_path: &Path) -> Result<()> {
+        Command::new(install_path)
+            .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
+            .spawn()?;
+        Ok(())
+    }
 }
 
-fn set_autostart(install_path: &Path) -> Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
-    let (key, _) = hkcu.create_subkey(path)?;
-    let command = format!(
-        "cmd /C start /min \"\" \"{}\"",
-        install_path.to_string_lossy()
-    );
-    key.set_value("Textra", &command)?;
-    showln!(
-        gray_dim,
-        "registered ",
-        yellow_bold,
-        "textra ",
-        gray_dim,
-        "for ",
-        green_bold,
-        "autostart",
-        gray_dim,
-        " in the registry."
-    );
-    Ok(())
-}
+mod config {
+    use super::*;
 
-fn start_background(install_path: &Path) -> Result<()> {
-    Command::new(install_path)
-        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
-        .spawn()?;
-    Ok(())
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+   pub  enum Message {
+        KeyEvent(DWORD, WPARAM, LPARAM),
+        ConfigReload,
+        Quit,
+    }
+    
+
+    #[derive(Debug, Deserialize, Serialize, Default, Clone)]
+    pub struct Config {
+        pub matches: Vec<Match>,
+        #[serde(default)]
+        pub backend: BackendConfig,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+    pub struct Match {
+        pub trigger: String,
+        pub replacement: Replacement,
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Clone)]
+    #[serde(tag = "type")]
+    pub enum Replacement {
+        Static {
+            text: String,
+            #[serde(default)]
+            propagate_case: bool,
+        },
+        Dynamic {
+            action: String,
+        },
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Default, Clone)]
+    pub struct BackendConfig {
+        #[serde(default = "default_key_delay")]
+        pub key_delay: u64,
+    }
+
+    pub fn default_key_delay() -> u64 {
+        10
+    }
+
+    pub fn load_config() -> Result<Config> {
+        let config_path = get_config_path()?;
+        let config_str = fs::read_to_string(&config_path)
+            .with_context(|| format!("Failed to read config file: {:?}", config_path))?;
+        let config: Config = serde_yaml::from_str(&config_str)
+            .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
+
+        minimo::showln!(
+            yellow_bold,
+            "┌─",
+            white_bold,
+            " TEXTRA",
+            yellow_bold,
+            " ───────────────────────────────────────────────────────"
+        );
+        minimo::showln!(yellow_bold, "│ ", green_bold, config_path.display());
+        if !config.matches.is_empty() {
+            for match_rule in &config.matches {
+                let (trigger, replace) = match &match_rule.replacement {
+                    Replacement::Static { text, .. } => (&match_rule.trigger, text),
+                    Replacement::Dynamic { action } => (&match_rule.trigger, action),
+                };
+                let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
+
+                minimo::showln!(
+                    yellow_bold,
+                    "│ ",
+                    yellow_bold,
+                    "▫ ",
+                    gray_dim,
+                    trigger,
+                    cyan_bold,
+                    " ⋯→ ",
+                    white_bold,
+                    trimmed
+                );
+            }
+        }
+        minimo::showln!(
+            yellow_bold,
+            "└───────────────────────────────────────────────────────────────"
+        );
+        minimo::showln!(gray_dim, "");
+        Ok(config)
+    }
+
+    pub fn get_config_path() -> Result<PathBuf> {
+        let current_dir = env::current_dir()?;
+        let current_dir_config = current_dir.join("config.yaml");
+        if current_dir_config.exists() {
+            return Ok(current_dir_config);
+        }
+
+        if current_dir.file_name().unwrap() == "textra" {
+            let config_file = current_dir.join("config.yaml");
+            create_default_config(&config_file)?;
+            return Ok(config_file);
+        }
+
+        let home_dir = dirs::document_dir().unwrap();
+        let home_config_dir = home_dir.join("textra");
+        let home_config_file = home_config_dir.join("config.yaml");
+
+        if home_config_file.exists() {
+            return Ok(home_config_file);
+        }
+
+        fs::create_dir_all(&home_config_dir).context("Failed to create config directory")?;
+        let home_config_file = home_config_dir.join("config.yaml");
+        create_default_config(&home_config_file)?;
+        Ok(home_config_file)
+    }
+
+    pub fn create_default_config(path: &Path) -> Result<()> {
+        let default_config = Config {
+            matches: vec![
+                Match {
+                    trigger: "btw".to_string(),
+                    replacement: Replacement::Static {
+                        text: "by the way".to_string(),
+                        propagate_case: false,
+                    },
+                },
+                Match {
+                    trigger: "date".to_string(),
+                    replacement: Replacement::Dynamic {
+                        action: "{{date}}".to_string(),
+                    },
+                },
+            ],
+            backend: BackendConfig { key_delay: 10 },
+        };
+        let yaml = serde_yaml::to_string(&default_config)?;
+        fs::write(path, yaml).context("Failed to write default config file")?;
+        Ok(())
+    }
+
+    pub fn watch_config(sender: Sender<Message>) -> Result<()> {
+        let config_path = get_config_path()?;
+        let config_dir = config_path.parent().unwrap();
+
+        unsafe {
+            let dir_handle = CreateFileW(
+                config_dir
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(Some(0))
+                    .collect::<Vec<_>>()
+                    .as_ptr(),
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                ptr::null_mut(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                ptr::null_mut(),
+            );
+
+            if dir_handle == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error().into());
+            }
+
+            let mut buffer = [0u8; 1024];
+            let mut bytes_returned: DWORD = 0;
+            let mut overlapped: OVERLAPPED = mem::zeroed();
+
+            loop {
+                let result = ReadDirectoryChangesW(
+                    dir_handle,
+                    buffer.as_mut_ptr() as LPVOID,
+                    buffer.len() as DWORD,
+                    FALSE,
+                    FILE_NOTIFY_CHANGE_LAST_WRITE,
+                    &mut bytes_returned,
+                    &mut overlapped,
+                    None,
+                );
+
+                if result == 0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+
+                let event = WaitForSingleObject(dir_handle, INFINITE);
+                if event != WAIT_OBJECT_0 {
+                    return Err(io::Error::last_os_error().into());
+                }
+
+                sender.send(Message::ConfigReload).unwrap();
+            }
+        }
+    }
+
+    pub static GLOBAL_SENDER: Lazy<Mutex<Option<Sender<Message>>>> = Lazy::new(|| Mutex::new(None));
+
+    pub fn set_global_sender(sender: Sender<Message>) {
+        let mut global_sender = GLOBAL_SENDER.lock();
+        *global_sender = Some(sender);
+    }
 }
 
 fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Result<()> {
@@ -355,164 +526,6 @@ fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Result<(
     Ok(())
 }
 
-fn load_config() -> Result<Config> {
-    let config_path = get_config_path()?;
-    let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file: {:?}", config_path))?;
-    let config: Config = serde_yaml::from_str(&config_str)
-        .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
-
-    minimo::showln!(
-        yellow_bold,
-        "┌─",
-        white_bold,
-        " TEXTRA",
-        yellow_bold,
-        " ───────────────────────────────────────────────────────"
-    );
-    minimo::showln!(yellow_bold, "│ ", green_bold, config_path.display());
-    if !config.matches.is_empty() {
-        for match_rule in &config.matches {
-            let (trigger, replace) = match &match_rule.replacement {
-                Replacement::Static { text, .. } => (&match_rule.trigger, text),
-                Replacement::Dynamic { action } => (&match_rule.trigger, action),
-            };
-            let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
-
-            minimo::showln!(
-                yellow_bold,
-                "│ ",
-                yellow_bold,
-                "▫ ",
-                gray_dim,
-                trigger,
-                cyan_bold,
-                " ⋯→ ",
-                white_bold,
-                trimmed
-            );
-        }
-    }
-    minimo::showln!(
-        yellow_bold,
-        "└───────────────────────────────────────────────────────────────"
-    );
-    minimo::showln!(gray_dim, "");
-    Ok(config)
-}
-
-fn get_config_path() -> Result<PathBuf> {
-    let current_dir = env::current_dir()?;
-    let current_dir_config = current_dir.join("config.yaml");
-    if current_dir_config.exists() {
-        return Ok(current_dir_config);
-    }
-
-    if current_dir.file_name().unwrap() == "textra" {
-        let config_file = current_dir.join("config.yaml");
-        create_default_config(&config_file)?;
-        return Ok(config_file);
-    }
-
-    let home_dir = dirs::document_dir().unwrap();
-    let home_config_dir = home_dir.join("textra");
-    let home_config_file = home_config_dir.join("config.yaml");
-
-    if home_config_file.exists() {
-        return Ok(home_config_file);
-    }
-
-    fs::create_dir_all(&home_config_dir).context("Failed to create config directory")?;
-    let home_config_file = home_config_dir.join("config.yaml");
-    create_default_config(&home_config_file)?;
-    Ok(home_config_file)
-}
-
-fn create_default_config(path: &Path) -> Result<()> {
-    let default_config = Config {
-        matches: vec![
-            Match {
-                trigger: "btw".to_string(),
-                replacement: Replacement::Static {
-                    text: "by the way".to_string(),
-                    propagate_case: false,
-                },
-            },
-            Match {
-                trigger: "date".to_string(),
-                replacement: Replacement::Dynamic {
-                    action: "{{date}}".to_string(),
-                },
-            },
-        ],
-        backend: BackendConfig { key_delay: 10 },
-    };
-    let yaml = serde_yaml::to_string(&default_config)?;
-    fs::write(path, yaml).context("Failed to write default config file")?;
-    Ok(())
-}
-
-fn watch_config(sender: Sender<Message>) -> Result<()> {
-    let config_path = get_config_path()?;
-    let config_dir = config_path.parent().unwrap();
-
-    unsafe {
-        let dir_handle = CreateFileW(
-            config_dir
-                .as_os_str()
-                .encode_wide()
-                .chain(Some(0))
-                .collect::<Vec<_>>()
-                .as_ptr(),
-            FILE_LIST_DIRECTORY,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null_mut(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
-            ptr::null_mut(),
-        );
-
-        if dir_handle == INVALID_HANDLE_VALUE {
-            return Err(io::Error::last_os_error().into());
-        }
-
-        let mut buffer = [0u8; 1024];
-        let mut bytes_returned: DWORD = 0;
-        let mut overlapped: OVERLAPPED = mem::zeroed();
-
-        loop {
-            let result = ReadDirectoryChangesW(
-                dir_handle,
-                buffer.as_mut_ptr() as LPVOID,
-                buffer.len() as DWORD,
-                FALSE,
-                FILE_NOTIFY_CHANGE_LAST_WRITE,
-                &mut bytes_returned,
-                &mut overlapped,
-                None,
-            );
-
-            if result == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-
-            let event = WaitForSingleObject(dir_handle, INFINITE);
-            if event != WAIT_OBJECT_0 {
-                return Err(io::Error::last_os_error().into());
-            }
-
-            sender.send(Message::ConfigReload).unwrap();
-        }
-    }
-}
-
-static GLOBAL_SENDER: Lazy<Mutex<Option<Sender<Message>>>> = Lazy::new(|| Mutex::new(None));
-
-fn set_global_sender(sender: Sender<Message>) {
-    let mut global_sender = GLOBAL_SENDER.lock();
-    *global_sender = Some(sender);
-}
-
 unsafe extern "system" fn keyboard_hook_proc(
     code: i32,
     w_param: WPARAM,
@@ -522,7 +535,7 @@ unsafe extern "system" fn keyboard_hook_proc(
         let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
         let vk_code = kb_struct.vkCode;
 
-        if let Some(sender) = GLOBAL_SENDER.lock().as_ref() {
+        if let Some(sender) = config::GLOBAL_SENDER.lock().as_ref() {
             let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
         }
     }
@@ -531,24 +544,19 @@ unsafe extern "system" fn keyboard_hook_proc(
 }
 
 fn listen_keyboard(sender: Sender<Message>) -> Result<()> {
-    set_global_sender(sender);
-
+    config::set_global_sender(sender);
     unsafe {
         let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
-
         if hook.is_null() {
             return Err(io::Error::last_os_error().into());
         }
-
         let mut msg: MSG = mem::zeroed();
         while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
-
         UnhookWindowsHookEx(hook);
     }
-
     Ok(())
 }
 
@@ -831,7 +839,7 @@ fn propagate_case_fn(original: &str, replacement: &str) -> String {
 
 fn reload_config(app_state: Arc<AppState>) -> Result<()> {
     let mut config = app_state.config.lock();
-    *config = load_config()?;
+    *config = config::load_config()?;
     Ok(())
 }
 
