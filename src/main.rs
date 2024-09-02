@@ -181,11 +181,12 @@ mod installer {
     pub fn create_uninstaller(install_dir: &Path) -> Result<()> {
         let uninstaller_path = install_dir.join("uninstall.bat");
         let uninstaller_content = format!(
-            "@echo off\n\
-            taskkill /F /IM textra.exe\n\
-            \"{0}\" uninstall\n\
-            rmdir /S /Q \"{1}\"\n",
-            install_dir.join("textra.exe").display(),
+            r#"
+            @echo off
+            taskkill /F /IM textra.exe
+            rmdir /S /Q "{0}"
+            echo Textra has been uninstalled.
+            "#,
             install_dir.display()
         );
         fs::write(uninstaller_path, uninstaller_content)?;
