@@ -95,7 +95,7 @@ fn display_help() -> Result<()> {
     );
     //display status
     display_status();
-    
+
     showln!(
         yellow_bold,
         "  textra run ",
@@ -133,6 +133,10 @@ fn display_help() -> Result<()> {
 
 
 mod installer {
+
+
+    use winapi::um::processthreadsapi::TerminateProcess;
+
     use super::*;
 
     pub fn install() -> Result<()> {
@@ -189,11 +193,88 @@ mod installer {
     }
 
     pub fn stop_running_instance() -> Result<()> {
-        Command::new("taskkill")
-            .args(&["/F", "/IM", "textra.exe"])
-            .output()?;
+      //use windows api to find and kill the running instance of textra
+      showln!(gray_dim,"Looking for running instance of Textra...");
+      //textra donot have a window so we need to look for a process with the name textra.exe
+      let processes = get_running_instances();
+      for process in processes {
+        if process.name() == "textra.exe" {
+            showln!(gray_dim, "Found running instance of Textra, killing...");
+            process.kill();
+        }
+      }
+
+      showln!(gray_dim, "Textra is sleeping...");
+      
         Ok(())
     }
+
+
+    #[derive(Debug)]
+    struct Process {
+        name: String,
+        pid: u32,
+    }
+
+    impl Process {
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        pub fn pid(&self) -> &u32 {
+            &self.pid
+        }
+
+        pub fn kill(&self) {
+            unsafe {
+                    TerminateProcess(self.pid as HANDLE, 0);
+            }
+        }
+    }
+
+ 
+    use winapi::um::tlhelp32::*;
+    pub fn get_running_instances() -> Vec<Process> {
+        let mut processes = Vec::new();
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return processes;
+        }
+    
+        let mut entry: PROCESSENTRY32 = unsafe { mem::zeroed() };
+        entry.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
+    
+        unsafe {
+            if Process32First(snapshot, &mut entry) == 0 {
+                CloseHandle(snapshot);
+                return processes;
+            }
+            loop {
+                let bytes = std::mem::transmute::<[i8; 260], [u8; 260]>(entry.szExeFile);
+
+                let name = {
+                  
+                    std::str::from_utf8_unchecked(&bytes[..bytes.iter().position(|&x| x == 0).unwrap_or(260)])
+                }.to_string();
+                processes.push(Process {
+                    name,
+                    pid: entry.th32ProcessID,
+                });
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+    
+        unsafe { CloseHandle(snapshot) };
+        processes
+    }
+
+
+        
+
+        
+
 
     pub fn remove_from_path() -> Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
