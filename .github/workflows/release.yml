@@ -30,6 +30,18 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc --bin textra
         working-directory: ./src  # Adjust this to the correct path where Cargo.toml is located
 
+      - name: Verify Binary File
+        run: |
+          EXE_PATH="./src/target/x86_64-pc-windows-msvc/release/textra.exe"
+          if [ -f "$EXE_PATH" ]; then
+            echo "Binary exists at $EXE_PATH"
+            echo "File size:"
+            ls -lh "$EXE_PATH"
+          else
+            echo "Binary does not exist at $EXE_PATH"
+            exit 1
+          fi
+
       - name: Custom Release Script
         shell: bash
         run: |
@@ -51,11 +63,15 @@ jobs:
           
           # Upload the .exe file to the release
           EXE_PATH="./src/target/x86_64-pc-windows-msvc/release/textra.exe"  # Adjust this path if necessary
-          curl -s --data-binary @"$EXE_PATH" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/octet-stream" \
-            "$UPLOAD_URL?name=textra-windows.exe"
-          
-          echo "Release and upload completed successfully"
+          if [ -f "$EXE_PATH" ]; then
+            curl -s --data-binary @"$EXE_PATH" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/octet-stream" \
+              "$UPLOAD_URL?name=textra-windows.exe"
+            echo "Release and upload completed successfully"
+          else
+            echo "Binary file not found, cannot upload."
+            exit 1
+          fi
 
       - name: Publish to crates.io
         run: cargo publish
