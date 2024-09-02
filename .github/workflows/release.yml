@@ -42,7 +42,7 @@ jobs:
           override: true
 
       - name: Build Rust Project
-        run: cargo build --release
+        run: cargo build --release --bin textra
         working-directory: ./src  # Adjust this to the correct path where Cargo.toml is located
 
       - name: Upload Artifact to Release
@@ -52,7 +52,7 @@ jobs:
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
           asset_path: ./src/target/release/textra.exe  # Adjust if necessary
-          asset_name: textra.exe
+          asset_name: textra-windows.exe
           asset_content_type: application/octet-stream
 
       - name: Publish to crates.io
