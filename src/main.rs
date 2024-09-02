@@ -86,27 +86,45 @@ impl AppState {
 
 
 fn display_help() -> Result<()> {
-    showln!(yellow_bold, "Textra - Text Expansion Service");
-    showln!(yellow_bold, "Usage:");
+    showln!(yellow_bold, 
+        "┌─",
+        white_bold,
+        " TEXTRA",
+        yellow_bold,
+        " ───────────────────────────────────────────────────────"
+    );
+    //display status
+    display_status();
+    
     showln!(
         yellow_bold,
-        "  textra run         - Start the Textra service"
+        "  textra run ",
+        gray_dim,
+        "                - Start the Textra service"
     );
     showln!(
         yellow_bold,
-        "  textra stop        - Stop the running Textra service"
+        "  textra stop ",
+        gray_dim,
+        "                - Stop the running Textra service"
     );
     showln!(
         yellow_bold,
-        "  textra install     - Install Textra as a service"
+        "  textra install ",
+        gray_dim,
+        "                - Install Textra as a service"
     );
     showln!(
         yellow_bold,
-        "  textra uninstall   - Uninstall the Textra service"
+        "  textra uninstall ",
+        gray_dim,
+        "                - Uninstall the Textra service"
     );
     showln!(
         yellow_bold,
-        "  textra status      - Display the status of the Textra service"
+        "  textra status ",
+        gray_dim,
+        "                - Display the status of the Textra service"
     );
     Ok(())
 }
