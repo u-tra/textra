@@ -3,17 +3,18 @@ use chrono::Local;
 use config::{Config, Message, Replacement, GLOBAL_SENDER};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use dirs;
-use minimo::{showln, yellow_bold};
+use minimo::{cyan_bold, gray_dim, green_bold, orange_bold, showln, white_bold, yellow_bold};
 use parking_lot::Mutex;
 use regex::Regex;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
+use single_instance::SingleInstance;
 use std::collections::HashMap;
 use std::ffi::{c_int, OsString};
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::process::Command;
+use std::process::{exit, Command};
 use std::time::{Duration, Instant};
 use std::{env, fs, io, mem, ptr, thread};
 use winapi::um::minwinbase::OVERLAPPED;
@@ -83,47 +84,41 @@ impl AppState {
 }
 
 
-fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
 
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "install" => return installer::install(),
-            "uninstall" => return installer::uninstall(),
-            _ => {
-                eprintln!("Unknown command. Use 'install' or 'uninstall'.");
-                return Ok(());
-            }
-        }
-    }
-
-    let app_state = Arc::new(AppState::new()?);
-    let (sender, receiver) = bounded(100);
-
-    let config_watcher = thread::spawn({
-        let sender = sender.clone();
-        move || config::watch_config(sender)
-    });
-
-    let keyboard_listener = thread::spawn({
-        let sender = sender.clone();
-        move || listen_keyboard(sender)
-    });
-
-    main_loop(app_state, &receiver)?;
-
-    sender.send(Message::Quit).unwrap();
-    config_watcher.join().unwrap()?;
-    keyboard_listener.join().unwrap()?;
-
+fn display_help() -> Result<()> {
+    showln!(yellow_bold, "Textra - Text Expansion Service");
+    showln!(yellow_bold, "Usage:");
+    showln!(
+        yellow_bold,
+        "  textra run         - Start the Textra service"
+    );
+    showln!(
+        yellow_bold,
+        "  textra stop        - Stop the running Textra service"
+    );
+    showln!(
+        yellow_bold,
+        "  textra install     - Install Textra as a service"
+    );
+    showln!(
+        yellow_bold,
+        "  textra uninstall   - Uninstall the Textra service"
+    );
+    showln!(
+        yellow_bold,
+        "  textra status      - Display the status of the Textra service"
+    );
     Ok(())
 }
+
+
+
 
 mod installer {
     use super::*;
 
     pub fn install() -> Result<()> {
-        showln!(yellow_bold, "installing textra...");
+        showln!(yellow_bold, "Installing Textra...");
 
         let exe_path = env::current_exe()?;
         let install_dir = dirs::data_local_dir().unwrap().join("Textra");
@@ -134,12 +129,11 @@ mod installer {
         add_to_path(&install_dir)?;
         set_autostart(&install_path)?;
         create_uninstaller(&install_dir)?;
-        start_background(&install_path)?;
 
-        showln!(green_bold, "textra have been successfully installed");
+        showln!(green_bold, "Textra has been successfully installed");
         showln!(
             gray_dim,
-            "to uninstall textra, run ",
+            "To uninstall Textra, run ",
             yellow_bold,
             "textra uninstall",
             gray_dim,
@@ -149,7 +143,7 @@ mod installer {
     }
 
     pub fn uninstall() -> Result<()> {
-        showln!(yellow_bold, "uninstalling textra...");
+        showln!(yellow_bold, "Uninstalling Textra...");
 
         stop_running_instance()?;
         remove_from_path()?;
@@ -158,7 +152,7 @@ mod installer {
         let install_dir = dirs::data_local_dir().unwrap().join("Textra");
         fs::remove_dir_all(&install_dir)?;
 
-        showln!(orange_bold, "textra have been uninstalled");
+        showln!(orange_bold, "Textra has been uninstalled");
         Ok(())
     }
 
@@ -208,7 +202,7 @@ mod installer {
         }
         showln!(
             gray_dim,
-            "removed ",
+            "Removed ",
             yellow_bold,
             "PATH",
             gray_dim,
@@ -225,7 +219,7 @@ mod installer {
         key.delete_value("Textra")?;
         showln!(
             gray_dim,
-            "removed ",
+            "Removed ",
             yellow_bold,
             "autostart",
             gray_dim,
@@ -254,9 +248,9 @@ mod installer {
         }
         showln!(
             gray_dim,
-            "added ",
+            "Added ",
             yellow_bold,
-            "textra",
+            "Textra",
             gray_dim,
             " to the ",
             green_bold,
@@ -272,15 +266,15 @@ mod installer {
         let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
         let (key, _) = hkcu.create_subkey(path)?;
         let command = format!(
-            "cmd /C start /min \"\" \"{}\"",
+            "cmd /C start /min \"\" \"{}\" run",
             install_path.to_string_lossy()
         );
         key.set_value("Textra", &command)?;
         showln!(
             gray_dim,
-            "registered ",
+            "Registered ",
             yellow_bold,
-            "textra ",
+            "Textra ",
             gray_dim,
             "for ",
             green_bold,
@@ -290,26 +284,17 @@ mod installer {
         );
         Ok(())
     }
-
-    pub fn start_background(install_path: &Path) -> Result<()> {
-        Command::new(install_path)
-            .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
-            .spawn()?;
-        Ok(())
-    }
 }
 
 mod config {
     use super::*;
 
-
     #[derive(Debug, Deserialize, Serialize, Clone)]
-   pub  enum Message {
+    pub enum Message {
         KeyEvent(DWORD, WPARAM, LPARAM),
         ConfigReload,
         Quit,
     }
-    
 
     #[derive(Debug, Deserialize, Serialize, Default, Clone)]
     pub struct Config {
@@ -888,4 +873,138 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
         // Add a small delay between batches for more natural input
         thread::sleep(delay);
     }
+}
+
+// Add this function to create a mutex file for single instance check
+fn create_mutex_file() -> Result<()> {
+    let mutex_file_path = dirs::data_local_dir()
+        .unwrap()
+        .join("Textra")
+        .join("textra.lock");
+    fs::create_dir_all(mutex_file_path.parent().unwrap())?;
+    fs::File::create(mutex_file_path)?;
+    Ok(())
+}
+
+// Add this function to remove the mutex file
+fn remove_mutex_file() -> Result<()> {
+    let mutex_file_path = dirs::data_local_dir()
+        .unwrap()
+        .join("Textra")
+        .join("textra.lock");
+    fs::remove_file(mutex_file_path)?;
+    Ok(())
+}
+
+// Modify the main function to use the mutex file
+fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() == 1 {
+        return display_help();
+    }
+
+    match args[1].as_str() {
+        "run" => {
+            if let Err(_) = create_mutex_file() {
+                showln!(
+                    orange_bold,
+                    "Another instance of Textra is already running."
+                );
+                return Ok(());
+            }
+            let result = run_service();
+            remove_mutex_file()?;
+            return result;
+        }
+        "stop" => return stop_service(),
+        "install" => return installer::install(),
+        "uninstall" => return installer::uninstall(),
+        "status" => return display_status(),
+        "daemon" => {
+            if let Err(_) = create_mutex_file() {
+                showln!(
+                    orange_bold,
+                    "Another instance of Textra is already running."
+                );
+                return Ok(());
+            }
+            let result = daemon();
+            remove_mutex_file()?;
+            return result;
+        }
+        _ => return display_help(),
+    }
+}
+
+// Modify the run_service function to use the new daemon function
+fn run_service() -> Result<()> {
+    showln!(green_bold, "Starting Textra service...");
+
+    // Daemonize the process
+    let exe_path = env::current_exe()?;
+    Command::new(exe_path)
+        .args(&["daemon"])
+        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
+        .spawn()?;
+
+    showln!(green_bold, "Textra service started successfully.");
+    Ok(())
+}
+
+// Implement the daemon function
+fn daemon() -> Result<()> {
+    let app_state = Arc::new(AppState::new()?);
+    let (sender, receiver) = bounded(100);
+
+    let config_watcher = thread::spawn({
+        let sender = sender.clone();
+        move || config::watch_config(sender)
+    });
+
+    let keyboard_listener = thread::spawn({
+        let sender = sender.clone();
+        move || listen_keyboard(sender)
+    });
+
+    main_loop(app_state, &receiver)?;
+
+    sender.send(Message::Quit).unwrap();
+    config_watcher.join().unwrap()?;
+    keyboard_listener.join().unwrap()?;
+
+    Ok(())
+}
+
+// Modify the stop_service function to use the mutex file
+fn stop_service() -> Result<()> {
+    showln!(yellow_bold, "Stopping Textra service...");
+
+    let mutex_file_path = dirs::data_local_dir()
+        .unwrap()
+        .join("Textra")
+        .join("textra.lock");
+    if mutex_file_path.exists() {
+        fs::remove_file(&mutex_file_path)?;
+        showln!(green_bold, "Textra service stopped successfully.");
+    } else {
+        showln!(orange_bold, "Textra service is not running.");
+    }
+
+    Ok(())
+}
+
+// Modify the display_status function to use the mutex file
+fn display_status() -> Result<()> {
+    let mutex_file_path = dirs::data_local_dir()
+        .unwrap()
+        .join("Textra")
+        .join("textra.lock");
+    if mutex_file_path.exists() {
+        showln!(green_bold, "Textra service is running.");
+    } else {
+        showln!(yellow_bold, "Textra service is not running.");
+    }
+
+    Ok(())
 }
