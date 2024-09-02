@@ -23,23 +23,26 @@ jobs:
           profile: minimal
           override: true
 
-      - name: Build Rust Project
-        run: cargo build --release --bin textra
+      - name: Install Windows Target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Build Rust Project for Windows
+        run: cargo build --release --target x86_64-pc-windows-msvc --bin textra
         working-directory: ./src  # Adjust this to the correct path where Cargo.toml is located
 
       - name: Custom Release Script
         shell: bash
         run: |
-          # Create a release tag
+          # Create a release tag based on the current timestamp
           RELEASE_TAG="v$(date +'%Y.%m.%d.%H%M%S')"
           echo "Creating release with tag $RELEASE_TAG"
           
-          # Create a GitHub release
+          # Create a GitHub release using the GitHub API
           API_JSON=$(printf '{"tag_name": "%s", "target_commitish": "master", "name": "textra 🚀 release %s", "draft": false, "prerelease": false}' $RELEASE_TAG $RELEASE_TAG)
           RESPONSE=$(curl -s -X POST -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -d "$API_JSON" https://api.github.com/repos/${{ github.repository }}/releases)
           
-          # Extract the upload URL
+          # Extract the upload URL from the API response
           UPLOAD_URL=$(echo "$RESPONSE" | jq -r .upload_url | sed -e "s/{?name,label}//")
           if [ "$UPLOAD_URL" == "null" ]; then
             echo "Failed to create release"
@@ -47,7 +50,7 @@ jobs:
           fi
           
           # Upload the .exe file to the release
-          EXE_PATH="./src/target/release/textra.exe"  # Adjust if necessary
+          EXE_PATH="./src/target/x86_64-pc-windows-msvc/release/textra.exe"  # Adjust this path if necessary
           curl -s --data-binary @"$EXE_PATH" -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Content-Type: application/octet-stream" \
             "$UPLOAD_URL?name=textra-windows.exe"
