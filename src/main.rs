@@ -8,53 +8,34 @@ use parking_lot::Mutex;
 use regex::Regex;
 use ropey::Rope;
 use serde::{Deserialize, Serialize};
-use single_instance::SingleInstance;
+use winapi::shared::minwindef::{DWORD, LPARAM, LRESULT, WPARAM};
+use winapi::um::minwinbase::STILL_ACTIVE;
+use winapi::um::wincon::FreeConsole;
 use std::collections::HashMap;
 use std::ffi::{c_int, OsString};
 use std::io::Write;
 use std::mem::MaybeUninit;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::process::CommandExt;
 use std::process::{exit, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fs, io, mem, ptr, thread};
-use winapi::um::minwinbase::OVERLAPPED;
+use winapi::um::handleapi::*;
+use winapi::um::processthreadsapi::{GetExitCodeProcess, OpenProcess, TerminateProcess};
 use winapi::um::synchapi::WaitForSingleObject;
+use winapi::um::tlhelp32::{
+    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+};
+use winapi::um::winbase::*;
+use winapi::um::winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE};
+use winapi::um::winuser::*;
 use winreg::enums::*;
 use winreg::RegKey;
 
-use std::os::windows::process::CommandExt;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
-
-use once_cell::sync::Lazy;
-use winapi::shared::minwindef::{DWORD, FALSE, LPARAM, LPDWORD, LPVOID, LRESULT, WPARAM};
-use winapi::shared::windef::HWND;
-use winapi::um::fileapi::*;
-use winapi::um::handleapi::*;
-use winapi::um::processthreadsapi::{GetCurrentThreadId, OpenProcess};
-use winapi::um::winbase::*;
-use winapi::um::winnt::{
-    FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, HANDLE,
-};
-use winapi::um::winuser::*;
-
-lazy_static::lazy_static! {
-    static ref GENERATING: AtomicBool = AtomicBool::new(false);
-}
-
-fn block_listener() {
-    GENERATING.store(true, Ordering::SeqCst);
-}
-
-fn unblock_listener() {
-    GENERATING.store(false, Ordering::SeqCst);
-}
-
-fn listener_is_blocked() -> bool {
-    GENERATING.load(Ordering::SeqCst)
-}
+const SERVICE_NAME: &str = "Textra";
+const MUTEX_NAME: &str = "Global\\TextraRunning";
 
 struct AppState {
     config: Arc<Mutex<Config>>,
@@ -82,66 +63,181 @@ impl AppState {
         })
     }
 }
+fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
 
+    if args.len() == 1 {
+        return display_help();
+    }
 
+    match args[1].as_str() {
+        "run" => run_service(),
+        "daemon" => daemon(),
+        "stop" => stop_service(),
+        "install" => installer::install(),
+        "uninstall" => installer::uninstall(),
+        "status" => display_status(),
+        _ => display_help(),
+    }
+}
 
-fn display_help() -> Result<()> {
-    showln!(yellow_bold, 
-        "┌─",
-        white_bold,
-        " TEXTRA",
-        yellow_bold,
-        " ───────────────────────────────────────────────────────"
-    );
-    //display status
-    display_status();
+fn run_service() -> Result<()> {
+    if is_service_running() {
+        showln!(yellow_bold, "textra is already running.");
+        return Ok(());
+    }
+    let mut command = std::process::Command::new(env::current_exe()?);
+    command.arg("daemon");
+    command.creation_flags(winapi::um::winbase::DETACHED_PROCESS);
+    match command.spawn() {
+        Ok(_) => {
+            showln!(green_bold, "Textra service started successfully");
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Failed to start Textra service: {}", e));
+        }
+    }
 
-    showln!(
-        yellow_bold,
-        "  textra run ",
-        gray_dim,
-        "                - Start the Textra service"
-    );
-    showln!(
-        yellow_bold,
-        "  textra stop ",
-        gray_dim,
-        "                - Stop the running Textra service"
-    );
-    showln!(
-        yellow_bold,
-        "  textra install ",
-        gray_dim,
-        "                - Install Textra as a service"
-    );
-    showln!(
-        yellow_bold,
-        "  textra uninstall ",
-        gray_dim,
-        "                - Uninstall the Textra service"
-    );
-    showln!(
-        yellow_bold,
-        "  textra status ",
-        gray_dim,
-        "                - Display the status of the Textra service"
-    );
     Ok(())
 }
 
+fn daemon() -> Result<()> {
+    let app_state = Arc::new(AppState::new()?);
+    let (sender, receiver) = bounded(100);
 
+    let config_watcher = thread::spawn({
+        let sender = sender.clone();
+        move || config::watch_config(sender)
+    });
 
+    let keyboard_listener = thread::spawn({
+        let sender = sender.clone();
+        move || listen_keyboard(sender)
+    });
+
+    main_loop(app_state, &receiver)?;
+
+    sender.send(Message::Quit).unwrap();
+    config_watcher.join().unwrap()?;
+    keyboard_listener.join().unwrap()?;
+
+    Ok(())
+}
+
+fn stop_service() -> Result<()> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return Err(anyhow::anyhow!("Failed to create process snapshot"));
+    }
+
+    let mut entry: PROCESSENTRY32 = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
+
+    let mut found = false;
+
+    unsafe {
+        if Process32First(snapshot, &mut entry) != 0 {
+            loop {
+                let bytes = std::mem::transmute::<[i8; 260], [u8; 260]>(entry.szExeFile);
+                let name = std::str::from_utf8_unchecked(
+                    &bytes[..bytes.iter().position(|&x| x == 0).unwrap_or(260)],
+                );
+
+                if name.to_lowercase() == "textra.exe" {
+                    found = true;
+                    let process_handle = OpenProcess(PROCESS_TERMINATE, 0, entry.th32ProcessID);
+                    if !process_handle.is_null() {
+                        if TerminateProcess(process_handle, 0) != 0 {
+                            showln!(green_bold, "Textra service stopped successfully.");
+                        } else {
+                            showln!(orange_bold, "Failed to terminate Textra process.");
+                        }
+                        CloseHandle(process_handle);
+                    } else {
+                        showln!(orange_bold, "Failed to open Textra process.");
+                    }
+                    break;
+                }
+
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+
+    if !found {
+        showln!(orange_bold, "Textra service is not running.");
+    }
+
+    Ok(())
+}
+
+fn is_service_running() -> bool {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        return false;
+    }
+
+    let mut entry: PROCESSENTRY32 = unsafe { mem::zeroed() };
+    entry.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
+
+    let mut textra_count = 0;
+    let current_pid = std::process::id();
+
+    unsafe {
+        if Process32First(snapshot, &mut entry) != 0 {
+            loop {
+                let bytes = std::mem::transmute::<[i8; 260], [u8; 260]>(entry.szExeFile);
+                let name = std::str::from_utf8_unchecked(
+                    &bytes[..bytes.iter().position(|&x| x == 0).unwrap_or(260)],
+                );
+
+                if name.to_lowercase() == "textra.exe" && entry.th32ProcessID != current_pid as u32 {
+                    let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, entry.th32ProcessID);
+                    if !process_handle.is_null() {
+                        let mut exit_code: DWORD = 0;
+                        if GetExitCodeProcess(process_handle, &mut exit_code) != 0 {
+                            if exit_code == STILL_ACTIVE {
+                                textra_count += 1;
+                            }
+                        }
+                        CloseHandle(process_handle);
+                    }
+                }
+
+                if Process32Next(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+
+    textra_count >= 1
+}
+
+fn display_status() -> Result<()> {
+    if is_service_running() {
+        showln!(yellow_bold, "│ ", green_bold, "service is running.");
+    } else {
+        showln!(yellow_bold, "│ ", orange_bold, "service is not running.");
+    }
+    Ok(())
+}
 
 mod installer {
-
-
-    use winapi::um::processthreadsapi::TerminateProcess;
+    use winapi::shared::minwindef::LPARAM;
 
     use super::*;
 
     pub fn install() -> Result<()> {
         showln!(yellow_bold, "Installing Textra...");
-
+        if is_service_running() {
+            showln!(orange_bold, "detected already running instance, stopping it...");
+            stop_service()?;
+        }
         let exe_path = env::current_exe()?;
         let install_dir = dirs::data_local_dir().unwrap().join("Textra");
         fs::create_dir_all(&install_dir)?;
@@ -166,8 +262,7 @@ mod installer {
 
     pub fn uninstall() -> Result<()> {
         showln!(yellow_bold, "Uninstalling Textra...");
-
-        stop_running_instance()?;
+        stop_service()?;
         remove_from_path()?;
         remove_autostart()?;
 
@@ -178,157 +273,7 @@ mod installer {
         Ok(())
     }
 
-    pub fn create_uninstaller(install_dir: &Path) -> Result<()> {
-        let uninstaller_path = install_dir.join("uninstall.bat");
-        let uninstaller_content = format!(
-            r#"
-            @echo off
-            taskkill /F /IM textra.exe
-            rmdir /S /Q "{0}"
-            echo Textra has been uninstalled.
-            "#,
-            install_dir.display()
-        );
-        fs::write(uninstaller_path, uninstaller_content)?;
-        Ok(())
-    }
-
-    pub fn stop_running_instance() -> Result<()> {
-      //use windows api to find and kill the running instance of textra
-      showln!(gray_dim,"Looking for running instance of Textra...");
-      //textra donot have a window so we need to look for a process with the name textra.exe
-      let processes = get_running_instances();
-      for process in processes {
-        if process.name() == "textra.exe" {
-            showln!(gray_dim, "Found running instance of Textra, killing...");
-            process.kill();
-        }
-      }
-
-      showln!(gray_dim, "Textra is sleeping...");
-      
-        Ok(())
-    }
-
-
-    #[derive(Debug)]
-    struct Process {
-        name: String,
-        pid: u32,
-    }
-
-    impl Process {
-        pub fn name(&self) -> &str {
-            &self.name
-        }
-
-        pub fn pid(&self) -> &u32 {
-            &self.pid
-        }
-
-        pub fn kill(&self) {
-            unsafe {
-                    TerminateProcess(self.pid as HANDLE, 0);
-            }
-        }
-    }
-
- 
-    use winapi::um::tlhelp32::*;
-    pub fn get_running_instances() -> Vec<Process> {
-        let mut processes = Vec::new();
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPALL, 0) };
-        if snapshot == INVALID_HANDLE_VALUE {
-            return processes;
-        }
-    
-        let mut entry: PROCESSENTRY32 = unsafe { mem::zeroed() };
-        entry.dwSize = mem::size_of::<PROCESSENTRY32>() as u32;
-    
-        unsafe {
-            if Process32First(snapshot, &mut entry) == 0 {
-                CloseHandle(snapshot);
-                return processes;
-            }
-            loop {
-                let bytes = std::mem::transmute::<[i8; 260], [u8; 260]>(entry.szExeFile);
-
-                let name = {
-                  
-                    std::str::from_utf8_unchecked(&bytes[..bytes.iter().position(|&x| x == 0).unwrap_or(260)])
-                }.to_string();
-                processes.push(Process {
-                    name,
-                    pid: entry.th32ProcessID,
-                });
-                if Process32Next(snapshot, &mut entry) == 0 {
-                    break;
-                }
-            }
-        }
-    
-        unsafe { CloseHandle(snapshot) };
-        processes
-    }
-
-
-        
-
-        
-
-
-    pub fn remove_from_path() -> Result<()> {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let (env, _) = hkcu.create_subkey("Environment")?;
-        let path: String = env.get_value("PATH")?;
-        let install_dir = dirs::data_local_dir().unwrap().join("Textra");
-        let new_path: Vec<&str> = path
-            .split(';')
-            .filter(|&p| p != install_dir.to_str().unwrap())
-            .collect();
-        let new_path = new_path.join(";");
-        env.set_value("PATH", &new_path)?;
-
-        unsafe {
-            SendMessageTimeoutA(
-                HWND_BROADCAST,
-                WM_SETTINGCHANGE,
-                0 as WPARAM,
-                "Environment\0".as_ptr() as LPARAM,
-                SMTO_ABORTIFHUNG,
-                5000,
-                ptr::null_mut(),
-            );
-        }
-        showln!(
-            gray_dim,
-            "Removed ",
-            yellow_bold,
-            "PATH",
-            gray_dim,
-            " entry"
-        );
-
-        Ok(())
-    }
-
-    pub fn remove_autostart() -> Result<()> {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
-        let (key, _) = hkcu.create_subkey(path)?;
-        key.delete_value("Textra")?;
-        showln!(
-            gray_dim,
-            "Removed ",
-            yellow_bold,
-            "autostart",
-            gray_dim,
-            " entry"
-        );
-        Ok(())
-    }
-
-    pub fn add_to_path(install_dir: &Path) -> Result<()> {
+    fn add_to_path(install_dir: &std::path::Path) -> Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let (env, _) = hkcu.create_subkey("Environment")?;
         let path: String = env.get_value("PATH")?;
@@ -336,12 +281,12 @@ mod installer {
         env.set_value("PATH", &new_path)?;
 
         unsafe {
-            SendMessageTimeoutA(
-                HWND_BROADCAST,
-                WM_SETTINGCHANGE,
-                0 as WPARAM,
+            winapi::um::winuser::SendMessageTimeoutA(
+                winapi::um::winuser::HWND_BROADCAST,
+                winapi::um::winuser::WM_SETTINGCHANGE,
+                0,
                 "Environment\0".as_ptr() as LPARAM,
-                SMTO_ABORTIFHUNG,
+                winapi::um::winuser::SMTO_ABORTIFHUNG,
                 5000,
                 ptr::null_mut(),
             );
@@ -361,7 +306,7 @@ mod installer {
         Ok(())
     }
 
-    pub fn set_autostart(install_path: &Path) -> Result<()> {
+    fn set_autostart(install_path: &std::path::Path) -> Result<()> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
         let (key, _) = hkcu.create_subkey(path)?;
@@ -372,9 +317,9 @@ mod installer {
         key.set_value("Textra", &command)?;
         showln!(
             gray_dim,
-            "Registered ",
+            "registered ",
             yellow_bold,
-            "Textra ",
+            "textra ",
             gray_dim,
             "for ",
             green_bold,
@@ -384,9 +329,516 @@ mod installer {
         );
         Ok(())
     }
+
+    fn remove_from_path() -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let (env, _) = hkcu.create_subkey("Environment")?;
+        let path: String = env.get_value("PATH")?;
+        let install_dir = dirs::data_local_dir().unwrap().join("Textra");
+        let new_path: Vec<&str> = path
+            .split(';')
+            .filter(|&p| p != install_dir.to_str().unwrap())
+            .collect();
+        let new_path = new_path.join(";");
+        env.set_value("PATH", &new_path)?;
+
+        unsafe {
+            winapi::um::winuser::SendMessageTimeoutA(
+                winapi::um::winuser::HWND_BROADCAST,
+                winapi::um::winuser::WM_SETTINGCHANGE,
+                0,
+                "Environment\0".as_ptr() as LPARAM,
+                winapi::um::winuser::SMTO_ABORTIFHUNG,
+                5000,
+                ptr::null_mut(),
+            );
+        }
+        showln!(
+            gray_dim,
+            "Removed ",
+            yellow_bold,
+            "PATH",
+            gray_dim,
+            " entry"
+        );
+
+        Ok(())
+    }
+
+    fn remove_autostart() -> Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let path = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let (key, _) = hkcu.create_subkey(path)?;
+        key.delete_value("Textra")?;
+        showln!(
+            gray_dim,
+            "Removed ",
+            yellow_bold,
+            "autostart",
+            gray_dim,
+            " entry"
+        );
+        Ok(())
+    }
+ 
+
+    fn create_uninstaller(install_dir: &std::path::Path) -> Result<()> {
+        let uninstaller_path = install_dir.join("uninstall.bat");
+        let uninstaller_content = format!(
+            r#"
+            @echo off
+            taskkill /F /IM textra.exe
+            rmdir /S /Q "{0}"
+            echo Textra has been uninstalled.
+            "#,
+            install_dir.display()
+        );
+        fs::write(uninstaller_path, uninstaller_content)?;
+        Ok(())
+    }
+}
+
+fn display_help() -> Result<()> {
+    showln!(
+        yellow_bold,
+        "┌─",
+        white_bold,
+        " TEXTRA",
+        yellow_bold,
+        " ───────────────────────────────────────────────────────"
+    );
+    display_status()?;
+
+    showln!(
+        yellow_bold,
+        "│ ",
+        cyan_bold,
+        "textra run ",
+        gray_dim,
+        "- Start the Textra service"
+    );
+    showln!(
+            yellow_bold,
+        "│ ",
+        cyan_bold,
+        "textra stop ",
+        gray_dim,
+        "- Stop the running Textra service"
+    );
+    showln!(
+        yellow_bold,
+        "│ ",
+        cyan_bold,
+        "textra install ",
+        gray_dim,
+        "- Install Textra as a service"
+    );
+    showln!(
+        yellow_bold,
+        "│ ",
+        cyan_bold,
+        "textra uninstall ",
+        gray_dim,
+        "- Uninstall the Textra service"
+    );
+    showln!(
+        yellow_bold,
+        "│ ",
+        cyan_bold,
+        "textra status ",
+        gray_dim,
+        "- Display the status of the Textra service"
+    );
+    Ok(())
+}
+
+fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Result<()> {
+    while let Ok(msg) = receiver.recv() {
+        match msg {
+            Message::KeyEvent(vk_code, w_param, l_param) => {
+                if let Err(e) = handle_key_event(Arc::clone(&app_state), vk_code, w_param, l_param)
+                {
+                    eprintln!("Error handling key event: {}", e);
+                }
+            }
+            Message::ConfigReload => {
+                if let Err(e) = reload_config(Arc::clone(&app_state)) {
+                    eprintln!("Error reloading config: {}", e);
+                }
+            }
+            Message::Quit => break,
+        }
+    }
+    Ok(())
+}
+
+unsafe extern "system" fn keyboard_hook_proc(
+    code: i32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    if code >= 0 && !listener_is_blocked() {
+        let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
+        let vk_code = kb_struct.vkCode;
+
+        if let Some(sender) = config::GLOBAL_SENDER.lock().as_ref() {
+            let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
+        }
+    }
+
+    CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
+}
+
+fn listen_keyboard(sender: Sender<Message>) -> Result<()> {
+    config::set_global_sender(sender);
+    unsafe {
+        let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
+        if hook.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut msg: MSG = mem::zeroed();
+        while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+        UnhookWindowsHookEx(hook);
+    }
+    Ok(())
+}
+
+lazy_static::lazy_static! {
+    static ref SYMBOL_PAIRS: HashMap<char, char> = {
+        let mut m = HashMap::new();
+        m.insert(';', ':');
+        m.insert(',', '<');
+        m.insert('.', '>');
+        m.insert('/', '?');
+        m.insert('\'', '"');
+        m.insert('[', '{');
+        m.insert(']', '}');
+        m.insert('\\', '|');
+        m.insert('`', '~');
+        m.insert('1', '!');
+        m.insert('2', '@');
+        m.insert('3', '#');
+        m.insert('4', '$');
+        m.insert('5', '%');
+        m.insert('6', '^');
+        m.insert('7', '&');
+        m.insert('8', '*');
+        m.insert('9', '(');
+        m.insert('0', ')');
+        m.insert('-', '_');
+        m.insert('=', '+');
+        m
+    };
+}
+
+fn handle_key_event(
+    app_state: Arc<AppState>,
+    vk_code: DWORD,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> Result<()> {
+    let now = Instant::now();
+
+    match w_param as u32 {
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let mut last_key_time = app_state.last_key_time.lock();
+            if now.duration_since(*last_key_time) > Duration::from_millis(1000) {
+                app_state.current_text.lock().remove(..);
+            }
+            *last_key_time = now;
+
+            match vk_code as i32 {
+                VK_ESCAPE => {
+                    app_state.killswitch.store(true, Ordering::SeqCst);
+                }
+                VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
+                    app_state.shift_pressed.store(true, Ordering::SeqCst);
+                }
+                VK_CAPITAL => {
+                    let current = app_state.caps_lock_on.load(Ordering::SeqCst);
+                    app_state.caps_lock_on.store(!current, Ordering::SeqCst);
+                }
+                _ => {
+                    if let Some(c) = get_char_from_vk(
+                        vk_code as i32,
+                        app_state.shift_pressed.load(Ordering::SeqCst),
+                    ) {
+                        let mut current_text = app_state.current_text.lock();
+                        let txtlen = current_text.len_chars();
+                        current_text.insert(txtlen, &c.to_string());
+                        check_and_replace(&app_state, &mut current_text)?;
+                    }
+                }
+            }
+        }
+        WM_KEYUP | WM_SYSKEYUP => match vk_code as i32 {
+            VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
+                app_state.shift_pressed.store(false, Ordering::SeqCst);
+            }
+            VK_ESCAPE => {
+                app_state.killswitch.store(false, Ordering::SeqCst);
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn get_char_from_vk(vk_code: i32, shift_pressed: bool) -> Option<char> {
+    unsafe {
+        let mut keyboard_state: [u8; 256] = std::mem::zeroed();
+        if shift_pressed {
+            keyboard_state[VK_SHIFT as usize] = 0x80;
+        }
+        GetKeyboardState(keyboard_state.as_mut_ptr());
+
+        let scan_code =
+            MapVirtualKeyExW(vk_code as u32, MAPVK_VK_TO_VSC_EX, ptr::null_mut()) as u16;
+        let mut char_buffer: [u16; 2] = [0; 2];
+
+        let result = ToUnicodeEx(
+            vk_code as u32,
+            scan_code as u32,
+            keyboard_state.as_ptr(),
+            char_buffer.as_mut_ptr(),
+            2,
+            0,
+            GetKeyboardLayout(0),
+        );
+
+        if result == 1 {
+            let c = char::from_u32(char_buffer[0] as u32)?;
+            if shift_pressed {
+                SYMBOL_PAIRS.get(&c).cloned().or(Some(c))
+            } else {
+                Some(c)
+            }
+        } else {
+            None
+        }
+    }
+}
+
+fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()> {
+    let immutable_current_text = current_text.to_string();
+    let config = app_state.config.lock();
+
+    for match_rule in &config.matches {
+        match &match_rule.replacement {
+            Replacement::Static {
+                text,
+                propagate_case,
+            } => {
+                if immutable_current_text.ends_with(&match_rule.trigger) {
+                    let start = immutable_current_text.len() - match_rule.trigger.len();
+
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        &immutable_current_text[start..],
+                        text,
+                        *propagate_case,
+                        false,
+                        app_state,
+                    )?;
+
+                    return Ok(());
+                }
+            }
+            Replacement::Dynamic { action } => {
+                if immutable_current_text.ends_with(&match_rule.trigger) {
+                    let replacement = process_dynamic_replacement(action);
+
+                    perform_replacement(
+                        current_text,
+                        config.backend.key_delay,
+                        &match_rule.trigger,
+                        &replacement,
+                        false,
+                        true,
+                        app_state,
+                    )?;
+
+                    return Ok(());
+                }
+            }
+        }
+
+        if match_rule.trigger.starts_with("regex") && match_rule.trigger.len() > 6 {
+            let regex = Regex::new(&match_rule.trigger[5..]).unwrap();
+            if let Some(captures) = regex.captures(&immutable_current_text) {
+                let replacement = match &match_rule.replacement {
+                    Replacement::Static { text, .. } => text.clone(),
+                    Replacement::Dynamic { action } => process_dynamic_replacement(action),
+                };
+                let mut final_replacement = replacement.clone();
+                for (i, capture) in captures.iter().enumerate().skip(1) {
+                    if let Some(capture) = capture {
+                        final_replacement =
+                            final_replacement.replace(&format!("${}", i), capture.as_str());
+                    }
+                }
+                perform_replacement(
+                    current_text,
+                    config.backend.key_delay,
+                    &immutable_current_text,
+                    &final_replacement,
+                    false,
+                    false,
+                    app_state,
+                )?;
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn perform_replacement(
+    current_text: &mut Rope,
+    key_delay: u64,
+    original: &str,
+    replacement: &str,
+    propagate_case: bool,
+    dynamic: bool,
+    app_state: &AppState,
+) -> Result<()> {
+    let final_replacement = if dynamic {
+        process_dynamic_replacement(replacement)
+    } else if propagate_case {
+        propagate_case_fn(original, replacement)
+    } else {
+        replacement.to_string()
+    };
+
+    if app_state.killswitch.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    // Block the listener before simulating key presses
+    block_listener();
+
+    // Backspace the original text
+    let backspace_count = original.chars().count();
+    let backspaces = vec![VK_BACK; backspace_count];
+    simulate_key_presses(&backspaces, key_delay);
+
+    // Type the replacement
+    let vk_codes = string_to_vk_codes(&final_replacement);
+    simulate_key_presses(&vk_codes, key_delay);
+
+    // Unblock the listener after simulating key presses
+    unblock_listener();
+
+    let start = current_text.len_chars() - original.len();
+    current_text.remove(start..current_text.len_chars());
+    current_text.insert(start, &final_replacement);
+
+    Ok(())
+}
+
+fn process_dynamic_replacement(replacement: &str) -> String {
+    match replacement.to_lowercase().as_str() {
+        "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
+        _ => replacement.to_string(),
+    }
+}
+
+fn propagate_case_fn(original: &str, replacement: &str) -> String {
+    if original.chars().all(|c| c.is_uppercase()) {
+        replacement.to_uppercase()
+    } else if original.chars().next().map_or(false, |c| c.is_uppercase()) {
+        let mut chars = replacement.chars();
+        match chars.next() {
+            None => String::new(),
+            Some(first_char) => first_char.to_uppercase().collect::<String>() + chars.as_str(),
+        }
+    } else {
+        replacement.to_string()
+    }
+}
+
+fn reload_config(app_state: Arc<AppState>) -> Result<()> {
+    let mut config = app_state.config.lock();
+    *config = config::load_config()?;
+    Ok(())
+}
+
+fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
+    let batch_size = 20;
+    let delay = Duration::from_millis(key_delay);
+    let input_count = vk_codes.len() * 2;
+    let mut inputs: Vec<MaybeUninit<INPUT>> = Vec::with_capacity(input_count);
+
+    // Pre-allocate the entire vector
+    unsafe { inputs.set_len(input_count) };
+
+    // Fill the vector without initializing
+    for (i, &vk) in vk_codes.iter().enumerate() {
+        let press_index = i * 2;
+        let release_index = press_index + 1;
+
+        // Key press event
+        unsafe {
+            let input = inputs[press_index].as_mut_ptr();
+            (*input).type_ = INPUT_KEYBOARD;
+            let ki = (*input).u.ki_mut();
+            ki.wVk = vk as u16;
+            ki.dwFlags = 0;
+        }
+
+        // Key release event
+        unsafe {
+            let input = inputs[release_index].as_mut_ptr();
+            (*input).type_ = INPUT_KEYBOARD;
+            let ki = (*input).u.ki_mut();
+            ki.wVk = vk as u16;
+            ki.dwFlags = KEYEVENTF_KEYUP;
+        }
+    }
+
+    // Send inputs in batches
+    for chunk in inputs.chunks(batch_size * 2) {
+        unsafe {
+            SendInput(
+                chunk.len() as u32,
+                chunk.as_ptr() as *mut INPUT,
+                std::mem::size_of::<INPUT>() as c_int,
+            );
+        }
+        // Add a small delay between batches for more natural input
+        thread::sleep(delay);
+    }
+}
+
+fn string_to_vk_codes(s: &str) -> Vec<i32> {
+    s.chars().map(|c| char_to_vk_code(c)).collect()
+}
+
+fn char_to_vk_code(c: char) -> i32 {
+    let vk_code = unsafe { VkKeyScanW(c as u16) as i32 };
+    let low_byte = vk_code & 0xFF;
+    let high_byte = (vk_code >> 8) & 0xFF;
+
+    if high_byte & 1 != 0 {
+        // Shift is required
+        VK_SHIFT
+    } else {
+        low_byte
+    }
 }
 
 mod config {
+    use std::path::{Path, PathBuf};
+
+    use once_cell::sync::Lazy;
+    use winapi::{shared::minwindef::{FALSE, LPVOID}, um::{fileapi::{CreateFileW, OPEN_EXISTING}, minwinbase::OVERLAPPED, winnt::{FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE}}};
+
     use super::*;
 
     #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -591,520 +1043,18 @@ mod config {
     }
 }
 
-fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Result<()> {
-    while let Ok(msg) = receiver.recv() {
-        match msg {
-            Message::KeyEvent(vk_code, w_param, l_param) => {
-                if let Err(e) = handle_key_event(Arc::clone(&app_state), vk_code, w_param, l_param)
-                {
-                    eprintln!("Error handling key event: {}", e);
-                }
-            }
-            Message::ConfigReload => {
-                if let Err(e) = reload_config(Arc::clone(&app_state)) {
-                    eprintln!("Error reloading config: {}", e);
-                }
-            }
-            Message::Quit => break,
-        }
-    }
-    Ok(())
+fn listener_is_blocked() -> bool {
+    GENERATING.load(Ordering::SeqCst)
 }
 
-unsafe extern "system" fn keyboard_hook_proc(
-    code: i32,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> LRESULT {
-    if code >= 0 && !listener_is_blocked() {
-        let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
-        let vk_code = kb_struct.vkCode;
-
-        if let Some(sender) = config::GLOBAL_SENDER.lock().as_ref() {
-            let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
-        }
-    }
-
-    CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
+fn block_listener() {
+    GENERATING.store(true, Ordering::SeqCst);
 }
 
-fn listen_keyboard(sender: Sender<Message>) -> Result<()> {
-    config::set_global_sender(sender);
-    unsafe {
-        let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
-        if hook.is_null() {
-            return Err(io::Error::last_os_error().into());
-        }
-        let mut msg: MSG = mem::zeroed();
-        while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageA(&msg);
-        }
-        UnhookWindowsHookEx(hook);
-    }
-    Ok(())
+fn unblock_listener() {
+    GENERATING.store(false, Ordering::SeqCst);
 }
 
 lazy_static::lazy_static! {
-    static ref SYMBOL_PAIRS: HashMap<char, char> = {
-        let mut m = HashMap::new();
-        m.insert(';', ':');
-        m.insert(',', '<');
-        m.insert('.', '>');
-        m.insert('/', '?');
-        m.insert('\'', '"');
-        m.insert('[', '{');
-        m.insert(']', '}');
-        m.insert('\\', '|');
-        m.insert('`', '~');
-        m.insert('1', '!');
-        m.insert('2', '@');
-        m.insert('3', '#');
-        m.insert('4', '$');
-        m.insert('5', '%');
-        m.insert('6', '^');
-        m.insert('7', '&');
-        m.insert('8', '*');
-        m.insert('9', '(');
-        m.insert('0', ')');
-        m.insert('-', '_');
-        m.insert('=', '+');
-        m
-    };
-}
-
-fn handle_key_event(
-    app_state: Arc<AppState>,
-    vk_code: DWORD,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> Result<()> {
-    if listener_is_blocked() {
-        return Ok(());
-    }
-    let now = Instant::now();
-
-    match w_param as u32 {
-        WM_KEYDOWN | WM_SYSKEYDOWN => {
-            let mut last_key_time = app_state.last_key_time.lock();
-            if now.duration_since(*last_key_time) > Duration::from_millis(1000) {
-                app_state.current_text.lock().remove(..);
-            }
-            *last_key_time = now;
-
-            match vk_code as i32 {
-                VK_ESCAPE => {
-                    app_state.killswitch.store(true, Ordering::SeqCst);
-                }
-                VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
-                    app_state.shift_pressed.store(true, Ordering::SeqCst);
-                }
-                VK_CAPITAL => {
-                    let current = app_state.caps_lock_on.load(Ordering::SeqCst);
-                    app_state.caps_lock_on.store(!current, Ordering::SeqCst);
-                }
-                _ => {
-                    if let Some(c) = get_char_from_vk(
-                        vk_code as i32,
-                        app_state.shift_pressed.load(Ordering::SeqCst),
-                    ) {
-                        let mut current_text = app_state.current_text.lock();
-                        let txtlen = current_text.len_chars();
-                        current_text.insert(txtlen, &c.to_string());
-                        check_and_replace(&app_state, &mut current_text)?;
-                    }
-                }
-            }
-        }
-        WM_KEYUP | WM_SYSKEYUP => match vk_code as i32 {
-            VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
-                app_state.shift_pressed.store(false, Ordering::SeqCst);
-            }
-            VK_ESCAPE => {
-                app_state.killswitch.store(false, Ordering::SeqCst);
-            }
-            _ => {}
-        },
-        _ => {}
-    }
-
-    Ok(())
-}
-
-fn get_char_from_vk(vk_code: i32, shift_pressed: bool) -> Option<char> {
-    unsafe {
-        let mut keyboard_state: [u8; 256] = std::mem::zeroed();
-        if shift_pressed {
-            keyboard_state[VK_SHIFT as usize] = 0x80;
-        }
-        GetKeyboardState(keyboard_state.as_mut_ptr());
-
-        let scan_code =
-            MapVirtualKeyExW(vk_code as u32, MAPVK_VK_TO_VSC_EX, ptr::null_mut()) as u16;
-        let mut char_buffer: [u16; 2] = [0; 2];
-
-        let result = ToUnicodeEx(
-            vk_code as u32,
-            scan_code as u32,
-            keyboard_state.as_ptr(),
-            char_buffer.as_mut_ptr(),
-            2,
-            0,
-            GetKeyboardLayout(0),
-        );
-
-        if result == 1 {
-            let c = char::from_u32(char_buffer[0] as u32)?;
-            if shift_pressed {
-                SYMBOL_PAIRS.get(&c).cloned().or(Some(c))
-            } else {
-                Some(c)
-            }
-        } else {
-            None
-        }
-    }
-}
-
-fn string_to_vk_codes(s: &str) -> Vec<i32> {
-    s.chars().map(|c| char_to_vk_code(c)).collect()
-}
-
-fn char_to_vk_code(c: char) -> i32 {
-    let vk_code = unsafe { VkKeyScanW(c as u16) as i32 };
-    let low_byte = vk_code & 0xFF;
-    let high_byte = (vk_code >> 8) & 0xFF;
-
-    if high_byte & 1 != 0 {
-        // Shift is required
-        VK_SHIFT
-    } else {
-        low_byte
-    }
-}
-
-fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()> {
-    let immutable_current_text = current_text.to_string();
-    let config = app_state.config.lock();
-
-    for match_rule in &config.matches {
-        match &match_rule.replacement {
-            Replacement::Static {
-                text,
-                propagate_case,
-            } => {
-                if immutable_current_text.ends_with(&match_rule.trigger) {
-                    let start = immutable_current_text.len() - match_rule.trigger.len();
-
-                    perform_replacement(
-                        current_text,
-                        config.backend.key_delay,
-                        &immutable_current_text[start..],
-                        text,
-                        *propagate_case,
-                        false,
-                        app_state,
-                    )?;
-
-                    return Ok(());
-                }
-            }
-            Replacement::Dynamic { action } => {
-                if immutable_current_text.ends_with(&match_rule.trigger) {
-                    let replacement = process_dynamic_replacement(action);
-
-                    perform_replacement(
-                        current_text,
-                        config.backend.key_delay,
-                        &match_rule.trigger,
-                        &replacement,
-                        false,
-                        true,
-                        app_state,
-                    )?;
-
-                    return Ok(());
-                }
-            }
-        }
-
-        if match_rule.trigger.starts_with("regex") && match_rule.trigger.len() > 6 {
-            let regex = Regex::new(&match_rule.trigger[5..]).unwrap();
-            if let Some(captures) = regex.captures(&immutable_current_text) {
-                let replacement = match &match_rule.replacement {
-                    Replacement::Static { text, .. } => text.clone(),
-                    Replacement::Dynamic { action } => process_dynamic_replacement(action),
-                };
-                let mut final_replacement = replacement.clone();
-                for (i, capture) in captures.iter().enumerate().skip(1) {
-                    if let Some(capture) = capture {
-                        final_replacement =
-                            final_replacement.replace(&format!("${}", i), capture.as_str());
-                    }
-                }
-                perform_replacement(
-                    current_text,
-                    config.backend.key_delay,
-                    &immutable_current_text,
-                    &final_replacement,
-                    false,
-                    false,
-                    app_state,
-                )?;
-                return Ok(());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn perform_replacement(
-    current_text: &mut Rope,
-    key_delay: u64,
-    original: &str,
-    replacement: &str,
-    propagate_case: bool,
-    dynamic: bool,
-    app_state: &AppState,
-) -> Result<()> {
-    let final_replacement = if dynamic {
-        process_dynamic_replacement(replacement)
-    } else if propagate_case {
-        propagate_case_fn(original, replacement)
-    } else {
-        replacement.to_string()
-    };
-
-    if app_state.killswitch.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-
-    // Block the listener before simulating key presses
-    block_listener();
-
-    // Backspace the original text
-    let backspace_count = original.chars().count();
-    let backspaces = vec![VK_BACK; backspace_count];
-    simulate_key_presses(&backspaces, key_delay);
-
-    // Type the replacement
-    let vk_codes = string_to_vk_codes(&final_replacement);
-    simulate_key_presses(&vk_codes, key_delay);
-
-    // Unblock the listener after simulating key presses
-    unblock_listener();
-
-    let start = current_text.len_chars() - original.len();
-    current_text.remove(start..current_text.len_chars());
-    current_text.insert(start, &final_replacement);
-
-    Ok(())
-}
-
-fn process_dynamic_replacement(replacement: &str) -> String {
-    match replacement.to_lowercase().as_str() {
-        "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
-        _ => replacement.to_string(),
-    }
-}
-
-fn propagate_case_fn(original: &str, replacement: &str) -> String {
-    if original.chars().all(|c| c.is_uppercase()) {
-        replacement.to_uppercase()
-    } else if original.chars().next().map_or(false, |c| c.is_uppercase()) {
-        let mut chars = replacement.chars();
-        match chars.next() {
-            None => String::new(),
-            Some(first_char) => first_char.to_uppercase().collect::<String>() + chars.as_str(),
-        }
-    } else {
-        replacement.to_string()
-    }
-}
-
-fn reload_config(app_state: Arc<AppState>) -> Result<()> {
-    let mut config = app_state.config.lock();
-    *config = config::load_config()?;
-    Ok(())
-}
-
-fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
-    let batch_size = 20;
-    let delay = Duration::from_millis(key_delay);
-    let input_count = vk_codes.len() * 2;
-    let mut inputs: Vec<MaybeUninit<INPUT>> = Vec::with_capacity(input_count);
-
-    // Pre-allocate the entire vector
-    unsafe { inputs.set_len(input_count) };
-
-    // Fill the vector without initializing
-    for (i, &vk) in vk_codes.iter().enumerate() {
-        let press_index = i * 2;
-        let release_index = press_index + 1;
-
-        // Key press event
-        unsafe {
-            let input = inputs[press_index].as_mut_ptr();
-            (*input).type_ = INPUT_KEYBOARD;
-            let ki = (*input).u.ki_mut();
-            ki.wVk = vk as u16;
-            ki.dwFlags = 0;
-        }
-
-        // Key release event
-        unsafe {
-            let input = inputs[release_index].as_mut_ptr();
-            (*input).type_ = INPUT_KEYBOARD;
-            let ki = (*input).u.ki_mut();
-            ki.wVk = vk as u16;
-            ki.dwFlags = KEYEVENTF_KEYUP;
-        }
-    }
-
-    // Send inputs in batches
-    for chunk in inputs.chunks(batch_size * 2) {
-        unsafe {
-            SendInput(
-                chunk.len() as u32,
-                chunk.as_ptr() as *mut INPUT,
-                std::mem::size_of::<INPUT>() as c_int,
-            );
-        }
-        // Add a small delay between batches for more natural input
-        thread::sleep(delay);
-    }
-}
-
-// Add this function to create a mutex file for single instance check
-fn create_mutex_file() -> Result<()> {
-    let mutex_file_path = dirs::data_local_dir()
-        .unwrap()
-        .join("Textra")
-        .join("textra.lock");
-    fs::create_dir_all(mutex_file_path.parent().unwrap())?;
-    fs::File::create(mutex_file_path)?;
-    Ok(())
-}
-
-// Add this function to remove the mutex file
-fn remove_mutex_file() -> Result<()> {
-    let mutex_file_path = dirs::data_local_dir()
-        .unwrap()
-        .join("Textra")
-        .join("textra.lock");
-    fs::remove_file(mutex_file_path)?;
-    Ok(())
-}
-
-// Modify the main function to use the mutex file
-fn main() -> Result<()> {
-    let args: Vec<String> = env::args().collect();
-
-    if args.len() == 1 {
-        return display_help();
-    }
-
-    match args[1].as_str() {
-        "run" => {
-            if let Err(_) = create_mutex_file() {
-                showln!(
-                    orange_bold,
-                    "Another instance of Textra is already running."
-                );
-                return Ok(());
-            }
-            let result = run_service();
-            remove_mutex_file()?;
-            return result;
-        }
-        "stop" => return stop_service(),
-        "install" => return installer::install(),
-        "uninstall" => return installer::uninstall(),
-        "status" => return display_status(),
-        "daemon" => {
-            if let Err(_) = create_mutex_file() {
-                showln!(
-                    orange_bold,
-                    "Another instance of Textra is already running."
-                );
-                return Ok(());
-            }
-            let result = daemon();
-            remove_mutex_file()?;
-            return result;
-        }
-        _ => return display_help(),
-    }
-}
-
-// Modify the run_service function to use the new daemon function
-fn run_service() -> Result<()> {
-    showln!(green_bold, "Starting Textra service...");
-
-    // Daemonize the process
-    let exe_path = env::current_exe()?;
-    Command::new(exe_path)
-        .args(&["daemon"])
-        .creation_flags(winapi::um::winbase::CREATE_NO_WINDOW)
-        .spawn()?;
-
-    showln!(green_bold, "Textra service started successfully.");
-    Ok(())
-}
-
-// Implement the daemon function
-fn daemon() -> Result<()> {
-    let app_state = Arc::new(AppState::new()?);
-    let (sender, receiver) = bounded(100);
-
-    let config_watcher = thread::spawn({
-        let sender = sender.clone();
-        move || config::watch_config(sender)
-    });
-
-    let keyboard_listener = thread::spawn({
-        let sender = sender.clone();
-        move || listen_keyboard(sender)
-    });
-
-    main_loop(app_state, &receiver)?;
-
-    sender.send(Message::Quit).unwrap();
-    config_watcher.join().unwrap()?;
-    keyboard_listener.join().unwrap()?;
-
-    Ok(())
-}
-
-// Modify the stop_service function to use the mutex file
-fn stop_service() -> Result<()> {
-    showln!(yellow_bold, "Stopping Textra service...");
-
-    let mutex_file_path = dirs::data_local_dir()
-        .unwrap()
-        .join("Textra")
-        .join("textra.lock");
-    if mutex_file_path.exists() {
-        fs::remove_file(&mutex_file_path)?;
-        showln!(green_bold, "Textra service stopped successfully.");
-    } else {
-        showln!(orange_bold, "Textra service is not running.");
-    }
-
-    Ok(())
-}
-
-// Modify the display_status function to use the mutex file
-fn display_status() -> Result<()> {
-    let mutex_file_path = dirs::data_local_dir()
-        .unwrap()
-        .join("Textra")
-        .join("textra.lock");
-    if mutex_file_path.exists() {
-        showln!(green_bold, "Textra service is running.");
-    } else {
-        showln!(yellow_bold, "Textra service is not running.");
-    }
-
-    Ok(())
+    static ref GENERATING: AtomicBool = AtomicBool::new(false);
 }
