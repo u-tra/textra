@@ -100,4 +100,13 @@ if ($local) {
 Write-Output "🎉 Pushing changes and tags to the repository..."
 git push && git push --tags
 
- 
+# Publish the package to crates.io directly
+Write-Output "📦 Attempting to publish package to crates.io..."
+cargo publish
+if ($LASTEXITCODE -eq 0) {
+    Write-Output "✨ Package successfully published to crates.io!"
+} else {
+    Write-Host "❌ Failed to publish package to crates.io. We did not update the crate." -ForegroundColor Red
+}
+
+Write-Output "🎉 Release v$newVersion completed!"
