@@ -449,6 +449,10 @@ fn display_help() -> Result<()> {
         gray_dim,
         "- Display the status of the Textra service"
     );
+    showln!(
+        yellow_bold,
+        "└───────────────────────────────────────────────────────"
+    );
     Ok(())
 }
 
@@ -968,9 +972,37 @@ mod config {
                     },
                 },
                 Match {
-                    trigger: "date".to_string(),
+                    trigger: ":date".to_string(),
                     replacement: Replacement::Dynamic {
                         action: "{{date}}".to_string(),
+                    },
+                },
+                Match {
+                    trigger: ":time".to_string(),
+                    replacement: Replacement::Dynamic {
+                        action: "{{time}}".to_string(),
+                    },
+                },
+                //common email responses
+                Match {
+                    trigger: "pfa".to_string(),
+                    replacement: Replacement::Static {
+                        text: "please find the attached information as requested".to_string(),
+                        propagate_case: false,
+                    },
+                },
+                Match {
+                    trigger: "pftb".to_string(),
+                    replacement: Replacement::Static {
+                        text: "please find the below information as required".to_string(),
+                        propagate_case: false,
+                    },
+                },
+                Match {
+                    trigger: ":tst".to_string(),
+                    replacement: Replacement::Static {
+                        text: "twinkle twinkle little star, how i wonder what you are,\nup above the world so high,\nlike a diamond in the sky".to_string(),
+                        propagate_case: false,
                     },
                 },
             ],
