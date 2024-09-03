@@ -54,6 +54,20 @@ if ($local) {
 }
 $releaseMessage = "Release v$newVersion ($publishDate)"
 
+# Build in release mode and move the binaries to the release folder
+$releaseFolder = "./release"
+if (Test-Path $releaseFolder) {
+    Remove-Item -Recurse -Force $releaseFolder
+}
+New-Item -ItemType Directory -Path $releaseFolder | Out-Null
+
+# Build for Windows
+cargo build --release --target x86_64-pc-windows-msvc
+Write-Output "🔨 Successfully built Windows binary"
+
+# Move the binaries to the release folder
+Move-Item -Path "./target/x86_64-pc-windows-msvc/release/textra.exe" -Destination $releaseFolder
+
 # Add ALL files to git
 git add .
 
@@ -64,7 +78,21 @@ git commit -m "$commitMessage"
 git tag -a "v$newVersion" -m "$releaseMessage"
 
 if ($local) {
-    Write-Output "🏠 Running in local mode, only tagging and committing changes."
+    Write-Output "🏠 Running in local mode, building binaries for Windows and Linux..."
+
+    # Build for Windows
+    cargo build --release 
+
+    # Create a new release
+    $releaseId = New-RandomGuid
+    $releasePath = "releases/$releaseId"
+    New-Item -ItemType Directory -Path $releasePath | Out-Null
+
+    # Copy Windows binary to release directory
+    $windowsBinaryPath = "./target/x86_64-pc-windows-msvc/release/textra.exe"
+    Copy-Item -Path $windowsBinaryPath -Destination "$releasePath/textra-windows.exe"
+
+    Write-Output "🎉 Release v$newVersion completed locally! Binaries are available in $releasePath"
     exit 0
 }
 
