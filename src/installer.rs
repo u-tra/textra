@@ -84,13 +84,42 @@ pub fn is_running_from_install_dir() -> bool {
 
 pub fn handle_uninstall() -> Result<()> {
     showln!(gray_dim, "uninstalling textra from your system...");
+   
+    match handle_stop().context("Failed to stop running instance") {
+        Ok(_) => {
+            showln!(gray_dim, "textra service ", red_bold, "stopped.");
+        }
+        Err(e) => {
+            showln!(orange_bold, "oops! couldn't stop textra service. you can stop it manually by running uninstall.bat in .textra folder");
+        }
+    }
+    match remove_autostart().context("Failed to remove autostart entry") {
+        Ok(_) => {
+            showln!(gray_dim, "autostart entry removed.");
+        }
+        Err(e) => {
+            showln!(gray_dim, "huh! couldn't remove autostart entry. maybe it's already removed.");
+        }
+    }
 
-    handle_stop().context("Failed to stop running instance")?;
-    remove_from_path().context("Failed to remove Textra from PATH")?;
-    remove_autostart().context("Failed to remove autostart entry")?;
+    match remove_from_path().context("Failed to remove textra from path") {
+        Ok(_) => {
+            showln!(gray_dim, "textra removed from path.");
+        }
+        Err(e) => {
+            showln!(gray_dim, "couldn't find textra in path. skipping...");
+        }
+    }
 
     let install_dir = get_install_dir()?;
-    fs::remove_dir_all(&install_dir).context("Failed to remove installation directory")?;
+    match fs::remove_dir_all(&install_dir).context("Failed to remove installation directory") {
+        Ok(_) => {
+            showln!(gray_dim, "textra removed from path.");
+        }
+        Err(e) => {
+            showln!(gray_dim, "couldn't find textra in path. skipping...");
+        }
+    }
 
     showln!(gray_dim, "textra have been ", red_bold, "uninstalled", gray_dim, " from your system.");
     Ok(())

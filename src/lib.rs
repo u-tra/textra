@@ -78,7 +78,7 @@ pub fn handle_run() -> Result<()> {
     command.creation_flags(winapi::um::winbase::DETACHED_PROCESS);
     match command.spawn() {
         Ok(_) => {
-            showln!(green_bold, "Textra service started successfully");
+            showln!(gray_dim, "textra service ", green_bold, "started.");
         }
         Err(e) => {
             return Err(anyhow::anyhow!("Failed to start Textra service: {}", e));
@@ -154,6 +154,7 @@ pub fn handle_stop() -> Result<()> {
 
                 if Process32Next(snapshot, &mut entry) == 0 {
                     break;
+                    //dont do anything
                 }
             }
         }
