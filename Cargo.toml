@@ -1,6 +1,6 @@
 [package]
 name = "textra"
-version = "0.1.49"
+version = "0.1.50"
 edition = "2021"
 authors = ["incredimo <a@xo.rs>"]
 description = "type less, write more"
@@ -16,6 +16,7 @@ ctrlc = "3.4.5"
 dashmap = "6.0.1"
 directories = "5.0.1"
 dirs = "5.0.1"
+ 
 lazy_static = "1.5.0"
 minimo = "0.5.12"
 notify = "6.1.1"
@@ -25,6 +26,7 @@ parking_lot = "0.12.3"
 rdev = { version = "0.5.3", features = ["serialize"] }
 regex = "1.10.6"
 ropey = "1.6.1"
+ 
 serde = { version = "1.0.207", features = ["derive"] }
 serde_yaml = "0.9.34"
 single-instance = "0.3.3"
@@ -33,8 +35,9 @@ tokio = { version = "1.39.2", features = ["full"] }
 toml = "0.8.19"
 tracing = "0.1.40"
 tracing-subscriber = "0.3.18"
-winapi = { version = "0.3.9", features = ["winuser", "winbase", "tlhelp32"] }
+winapi = { version = "0.3.9", features = ["winuser", "winbase", "tlhelp32", "namedpipeapi"] }
 winreg = "0.52.0"
+
 
 
 
