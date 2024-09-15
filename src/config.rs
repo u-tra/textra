@@ -60,15 +60,26 @@ pub fn load_config() -> Result<Config> {
 }
 
 
+pub fn handle_edit_config() -> Result<()> {
+    let config_path = get_config_path()?;
+    //if vs code is installed, use it to edit the config file. else use notepad.
+    if let Ok(code_path) = which::which("code") {
+        std::process::Command::new(code_path).arg(&config_path).spawn()?;
+    } else if let Ok(notepad_path) = which::which("notepad") {
+        std::process::Command::new(notepad_path).arg(&config_path).spawn()?;
+    } else {
+        return Err(anyhow::anyhow!("No editor found. Please install Notepad or VS Code."));
+    }
+    Ok(())
+}
+
 
 pub fn display_config( )   {
     minimo::showln!(
         yellow_bold,
-        "┌─",
+        "│ ",
         whitebg,
-        " CONFIGURATION ",
-        yellow_bold,
-        " ─────────────────────────────────────────"
+        " CONFIGURATION "
     );
     showln!(   yellow_bold,
         "│ ");
@@ -98,6 +109,7 @@ pub fn display_config( )   {
             );
         }
     }
+    showln!(yellow_bold, "│ ");
     minimo::showln!(
         yellow_bold,
         "└───────────────────────────────────────────────────────────────"

@@ -1,3 +1,5 @@
+#![allow(unused_imports, unused_variables, unused_mut, unused_assignments, unused_imports)]
+
 use anyhow::{Context, Result};
 use chrono::Local;
 use config::{Config, Message, Replacement, GLOBAL_SENDER};
@@ -56,12 +58,12 @@ fn main() -> Result<()> {
     }
 
     match args[1].as_str() {
-        "run" => handle_run(),
-        "daemon" => handle_daemon(),
-        "stop" => handle_stop(),
-        "install" => installer::install(),
-        "uninstall" => installer::uninstall(),
-        "status" => handle_display_status(),
+        "run" | "start" => handle_run(),
+        "config" | "edit" | "settings" => handle_edit_config(),
+        "daemon" | "service" => handle_daemon(),
+        "stop" | "kill" => handle_stop(),
+        "install" | "setup" => installer::install(),
+        "uninstall" | "remove" => installer::uninstall(),
         _ => display_help(),
     }
 }
@@ -232,7 +234,7 @@ fn display_help() -> Result<()> {
     showln!(yellow_bold, "│ ");
     handle_display_status()?;
     showln!(yellow_bold, "│ ");
-    showln!(yellow_bold, "│ ",  whitebg, " HOW TO USE ", gray_dim," ──────");
+    showln!(yellow_bold, "│ ",  whitebg, " HOW TO USE " );
     showln!(yellow_bold, "│ ");
     showln!(
         yellow_bold,
@@ -276,8 +278,17 @@ fn display_help() -> Result<()> {
     );
     showln!(
         yellow_bold,
-        "└───────────────────────────────────────────────────────"
+        "│ ",
+        cyan_bold,
+        "textra edit ",
+        gray_dim,
+        "- Edit the Textra configuration file"
     );
+    showln!(
+        yellow_bold,
+        "│ " 
+    );
+ 
     config::display_config();
     Ok(())
 }
