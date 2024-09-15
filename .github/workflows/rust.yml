@@ -1,0 +1,57 @@
+name: Rust Windows Build and Release
+on:
+  push:
+    branches: [ "master" ]
+  pull_request:
+    branches: [ "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    if: contains(github.event.head_commit.message, 'release')
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch all history for all tags and branches
+    
+    - name: Set up Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+    
+    - name: Run tests
+      run: cargo test --verbose
+    
+    - name: Build
+      run: cargo build --release
+    
+    - name: Get latest tag
+      id: get_tag
+      run: echo "TAG=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
+      shell: bash
+    
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ steps.get_tag.outputs.TAG }}
+        release_name: Release ${{ steps.get_tag.outputs.TAG }}
+        draft: false
+        prerelease: false
+    
+    - name: Upload Release Asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./target/release/textra.exe
+        asset_name: your_executable_name.exe
+        asset_content_type: application/octet-stream
