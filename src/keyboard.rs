@@ -1,3 +1,5 @@
+use parking_lot::Mutex;
+
 pub use super::*;
 
 
@@ -58,7 +60,7 @@ if code >= 0 && !listener_is_blocked() {
     let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
     let vk_code = kb_struct.vkCode;
 
-    if let Some(sender) = config::GLOBAL_SENDER.lock().as_ref() {
+    if let Some(sender) = config::GLOBAL_SENDER.lock().unwrap().as_ref() {
         let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
     }
 }
@@ -204,22 +206,22 @@ unsafe {
 fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()> {
 let immutable_current_text = current_text.to_string();
 let config = app_state.config.lock();
-
+let propagate_case =  true;
 for match_rule in &config.matches {
     match &match_rule.replacement {
         Replacement::Static {
             text,
-            propagate_case,
+       
         } => {
             if immutable_current_text.ends_with(&match_rule.trigger) {
                 let start = immutable_current_text.len() - match_rule.trigger.len();
 
                 perform_replacement(
                     current_text,
-                    config.backend.key_delay,
+         
                     &immutable_current_text[start..],
-                    text,
-                    *propagate_case,
+                    text.as_str(),
+                    propagate_case,
                     false,
                     app_state,
                 )?;
@@ -229,11 +231,11 @@ for match_rule in &config.matches {
         }
         Replacement::Dynamic { action } => {
             if immutable_current_text.ends_with(&match_rule.trigger) {
-                let replacement = process_dynamic_replacement(action);
+                let replacement = process_dynamic_replacement(action.as_str());
 
                 perform_replacement(
                     current_text,
-                    config.backend.key_delay,
+            
                     &match_rule.trigger,
                     &replacement,
                     false,
@@ -251,7 +253,7 @@ for match_rule in &config.matches {
         if let Some(captures) = regex.captures(&immutable_current_text) {
             let replacement = match &match_rule.replacement {
                 Replacement::Static { text, .. } => text.clone(),
-                Replacement::Dynamic { action } => process_dynamic_replacement(action),
+                Replacement::Dynamic { action } => process_dynamic_replacement(action.as_str()),
             };
             let mut final_replacement = replacement.clone();
             for (i, capture) in captures.iter().enumerate().skip(1) {
@@ -262,7 +264,6 @@ for match_rule in &config.matches {
             }
             perform_replacement(
                 current_text,
-                config.backend.key_delay,
                 &immutable_current_text,
                 &final_replacement,
                 false,
@@ -276,9 +277,11 @@ for match_rule in &config.matches {
 Ok(())
 }
 
+
+const KEY_DELAY: u64 = 10;
+
 fn perform_replacement(
 current_text: &mut Rope,
-key_delay: u64,
 original: &str,
 replacement: &str,
 propagate_case: bool,
@@ -303,11 +306,11 @@ block_listener();
 // Backspace the original text
 let backspace_count = original.chars().count();
 let backspaces = vec![VK_BACK; backspace_count];
-simulate_key_presses(&backspaces, key_delay);
+simulate_key_presses(&backspaces, KEY_DELAY);
 
 // Type the replacement
 let vk_codes = string_to_vk_codes(&final_replacement);
-simulate_key_presses(&vk_codes, key_delay);
+simulate_key_presses(&vk_codes, KEY_DELAY);
 
 // Unblock the listener after simulating key presses
 unblock_listener();
@@ -342,7 +345,10 @@ if original.chars().all(|c| c.is_uppercase()) {
 
 fn reload_config(app_state: Arc<AppState>) -> Result<()> {
 let mut config = app_state.config.lock();
-*config = config::load_config()?;
+*config = config::load_config().unwrap_or_else(|e| {
+    eprintln!("Error loading config: {}", e);
+    config::Config::default()
+});
 Ok(())
 }
 

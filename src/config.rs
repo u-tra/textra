@@ -1,192 +1,155 @@
-use std::path::{Path, PathBuf};
-
+use nom::{
+    branch::alt,
+    bytes::complete::{tag, take_until, take_while1},
+    character::complete::{char, line_ending, multispace0, space0},
+    combinator::{all_consuming, opt},
+    error::{VerboseError, VerboseErrorKind},
+    multi::many0,
+    sequence::delimited,
+    IResult,
+};
 use once_cell::sync::Lazy;
-use winapi::{shared::minwindef::{FALSE, LPVOID}, um::{fileapi::{CreateFileW, OPEN_EXISTING}, minwinbase::OVERLAPPED, winnt::{FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE}}};
-
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::{fmt, os::windows::ffi::OsStrExt};
+use std::{mem, ptr};
+use winapi::{
+    shared::minwindef::{DWORD, FALSE, LPARAM, LPVOID, WPARAM},
+    um::{
+        fileapi::{CreateFileW, OPEN_EXISTING},
+        handleapi::INVALID_HANDLE_VALUE,
+        minwinbase::OVERLAPPED,
+        synchapi::WaitForSingleObject,
+        winbase::{
+            ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, INFINITE,
+            WAIT_OBJECT_0,
+        },
+        winnt::{
+            FILE_LIST_DIRECTORY, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_SHARE_DELETE, FILE_SHARE_READ,
+            FILE_SHARE_WRITE,
+        },
+    },
+};
 use super::*;
+use crate::parse::ParseError;
+const CONFIG_FILE_NAME: &str = "config.textra";
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub enum Message {
-    KeyEvent(DWORD, WPARAM, LPARAM),
-    ConfigReload,
-    Quit,
-}
-
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Config {
     pub matches: Vec<Match>,
-    #[serde(default)]
-    pub backend: BackendConfig,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub trigger: String,
     pub replacement: Replacement,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(tag = "type")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Replacement {
-    Static {
-        text: String,
-        #[serde(default)]
-        propagate_case: bool,
-    },
-    Dynamic {
-        action: String,
-    },
+    Static { text: String },
+    Dynamic { action: String },
 }
 
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-pub struct BackendConfig {
-    #[serde(default = "default_key_delay")]
-    pub key_delay: u64,
-}
-
-pub fn default_key_delay() -> u64 {
-    10
-}
-
-pub fn load_config() -> Result<Config> {
-    let config_path = get_config_path()?;
+pub fn load_config() -> Result<Config, ParseError> {
+    let config_path = get_config_path().unwrap();
     let config_str = fs::read_to_string(&config_path)
-        .with_context(|| format!("Failed to read config file: {:?}", config_path))?;
-    let config: Config = serde_yaml::from_str(&config_str)
-        .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
-    minimo::set!(config.clone());
-    minimo::set!(  config_path.clone() );
-    Ok(config)
+        .expect(&format!("Failed to read config file: {:?}", config_path));
+    Config::parse(&config_str)
 }
 
-
-pub fn handle_edit_config() -> Result<()> {
-    let config_path = get_config_path()?;
-    //if vs code is installed, use it to edit the config file. else use notepad.
+pub fn handle_edit_config() -> Result<(), io::Error> {
+    let config_path = get_config_path().unwrap();
     if let Ok(code_path) = which::which("code") {
-        std::process::Command::new(code_path).arg(&config_path).spawn()?;
+        std::process::Command::new(code_path)
+            .arg(&config_path)
+            .spawn()?;
     } else if let Ok(notepad_path) = which::which("notepad") {
-        std::process::Command::new(notepad_path).arg(&config_path).spawn()?;
+        std::process::Command::new(notepad_path)
+            .arg(&config_path)
+            .spawn()?;
     } else {
-        return Err(anyhow::anyhow!("No editor found. Please install Notepad or VS Code."));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No editor found. Please install Notepad or VS Code.",
+        ));
     }
     Ok(())
 }
 
-
-pub fn display_config( )   {
-    minimo::showln!(
-        yellow_bold,
-        "│ ",
-        whitebg,
-        " CONFIGURATION "
-    );
-    showln!(   yellow_bold,
-        "│ ");
-    let config = load_config().unwrap();
-    let config_path = minimo::get!(PathBuf);
-    minimo::showln!(yellow_bold, "│ ", cyan_bold, "┌─ ",white_bold, config_path.display());
-    showln!(yellow_bold, "│ ", cyan_bold, "⇣ ");
-    if !config.matches.is_empty() { 
-        for match_rule in &config.matches {
-            let (trigger, replace) = match &match_rule.replacement {
-                Replacement::Static { text, .. } => (&match_rule.trigger, text),
-                Replacement::Dynamic { action } => (&match_rule.trigger, action),
-            };
-            let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
-
+pub fn display_config() {
+    minimo::showln!(yellow_bold, "│ ", whitebg, " CONFIGURATION ");
+    minimo::showln!(yellow_bold, "│ ");
+    match load_config() {
+        Ok(config) => {
+            let config_path =  get_config_path().unwrap();
             minimo::showln!(
                 yellow_bold,
                 "│ ",
                 cyan_bold,
-                "▫ ",
-                gray_dim,
-                trigger,
-                cyan_bold,
-                " ⋯→ ",
+                "┌─ ",
                 white_bold,
-                trimmed
+                config_path.display()
             );
+            minimo::showln!(yellow_bold, "│ ", cyan_bold, "⇣ ");
+            if !config.matches.is_empty() {
+                for match_rule in &config.matches {
+                    let (trigger, replace) = match &match_rule.replacement {
+                        Replacement::Static { text } => (&match_rule.trigger, text),
+                        Replacement::Dynamic { action } => (&match_rule.trigger, action),
+                    };
+                    let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
+
+                    minimo::showln!(
+                        yellow_bold,
+                        "│ ",
+                        cyan_bold,
+                        "▫ ",
+                        gray_dim,
+                        trigger,
+                        cyan_bold,
+                        " ⋯→ ",
+                        white_bold,
+                        trimmed
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            minimo::showln!(red_bold, e);
         }
     }
-    showln!(yellow_bold, "│ ");
+    minimo::showln!(yellow_bold, "│ ");
     minimo::showln!(
         yellow_bold,
         "└───────────────────────────────────────────────────────────────"
     );
     minimo::showln!(gray_dim, "");
- 
 }
 
-pub fn get_config_path() -> Result<PathBuf> {
- 
+pub fn get_config_path() -> Result<PathBuf, io::Error> {
     let home_dir = dirs::document_dir().unwrap();
     let home_config_dir = home_dir.join("textra");
-    let home_config_file = home_config_dir.join("config.yaml");
+    let home_config_file = home_config_dir.join(CONFIG_FILE_NAME);
 
     if home_config_file.exists() {
         return Ok(home_config_file);
     }
 
-    fs::create_dir_all(&home_config_dir).context("Failed to create config directory")?;
-    let home_config_file = home_config_dir.join("config.yaml");
+    fs::create_dir_all(&home_config_dir)?;
+    let home_config_file = home_config_dir.join(CONFIG_FILE_NAME);
     create_default_config(&home_config_file)?;
     Ok(home_config_file)
 }
 
-pub fn create_default_config(path: &Path) -> Result<()> {
-    let default_config = Config {
-        matches: vec![
-            Match {
-                trigger: "btw".to_string(),
-                replacement: Replacement::Static {
-                    text: "by the way".to_string(),
-                    propagate_case: false,
-                },
-            },
-            Match {
-                trigger: ":date".to_string(),
-                replacement: Replacement::Dynamic {
-                    action: "{{date}}".to_string(),
-                },
-            },
-            Match {
-                trigger: ":time".to_string(),
-                replacement: Replacement::Dynamic {
-                    action: "{{time}}".to_string(),
-                },
-            },
-            //common email responses
-            Match {
-                trigger: "pfa".to_string(),
-                replacement: Replacement::Static {
-                    text: "please find the attached information as requested".to_string(),
-                    propagate_case: false,
-                },
-            },
-            Match {
-                trigger: "pftb".to_string(),
-                replacement: Replacement::Static {
-                    text: "please find the below information as required".to_string(),
-                    propagate_case: false,
-                },
-            },
-            Match {
-                trigger: ":tst".to_string(),
-                replacement: Replacement::Static {
-                    text: "twinkle twinkle little star, how i wonder what you are,\nup above the world so high,\nlike a diamond in the sky".to_string(),
-                    propagate_case: false,
-                },
-            },
-        ],
-        backend: BackendConfig { key_delay: 10 },
-    };
-    let yaml = serde_yaml::to_string(&default_config)?;
-    fs::write(path, yaml).context("Failed to write default config file")?;
+pub fn create_default_config(path: &Path) -> Result<(), io::Error> {
+    fs::write(path, DEFAULT_CONFIG).expect("Failed to write default config file");
     Ok(())
 }
 
-pub fn watch_config(sender: Sender<Message>) -> Result<()> {
+pub fn watch_config(sender: crossbeam_channel::Sender<Message>) -> Result<(), io::Error> {
     let config_path = get_config_path()?;
     let config_dir = config_path.parent().unwrap();
 
@@ -240,9 +203,45 @@ pub fn watch_config(sender: Sender<Message>) -> Result<()> {
     }
 }
 
-pub static GLOBAL_SENDER: Lazy<Mutex<Option<Sender<Message>>>> = Lazy::new(|| Mutex::new(None));
+pub static GLOBAL_SENDER: Lazy<Mutex<Option<crossbeam_channel::Sender<Message>>>> =
+    Lazy::new(|| Mutex::new(None));
 
-pub fn set_global_sender(sender: Sender<Message>) {
-    let mut global_sender = GLOBAL_SENDER.lock();
+pub fn set_global_sender(sender: crossbeam_channel::Sender<Message>) {
+    let mut global_sender = GLOBAL_SENDER.lock().unwrap();
     *global_sender = Some(sender);
 }
+
+#[derive(Debug, Clone)]
+pub enum Message {
+    KeyEvent(DWORD, WPARAM, LPARAM),
+    ConfigReload,
+    Quit,
+}
+
+ 
+
+const DEFAULT_CONFIG: &str = r#"
+// this is textra config file
+// you can add your own triggers and replacements here
+// when you type the text before `=>` it will be replaced with the text that follows
+// it's as simple as that!
+
+
+btw => by the way
+:date => {date.now()}
+:time => {time.now()}
+:email => example@example.com
+:psswd => 0nceUpon@TimeInPluto  
+pfa => please find the attached information as requested
+pftb => please find the below information as required
+:tst => `twinkle twinkle little star, how i wonder what you are,
+up above the world so high,
+like a diamond in the sky`
+ccc => continue writing complete code without skipping anything
+//we can also write complex code that we want to execute
+
+:ping => [javascript]{
+    let pr = await network.ping("www.google.com");
+    return "I pinged Google and it responded $pr";
+}
+"#;
