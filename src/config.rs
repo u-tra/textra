@@ -54,17 +54,29 @@ pub fn load_config() -> Result<Config> {
         .with_context(|| format!("Failed to read config file: {:?}", config_path))?;
     let config: Config = serde_yaml::from_str(&config_str)
         .with_context(|| format!("Failed to parse config file: {:?}", config_path))?;
+    minimo::set!(config.clone());
+    minimo::set!(  config_path.clone() );
+    Ok(config)
+}
 
+
+
+pub fn display_config( )   {
     minimo::showln!(
         yellow_bold,
         "┌─",
-        white_bold,
-        " TEXTRA",
+        whitebg,
+        " CONFIGURATION ",
         yellow_bold,
-        " ───────────────────────────────────────────────────────"
+        " ─────────────────────────────────────────"
     );
-    minimo::showln!(yellow_bold, "│ ", green_bold, config_path.display());
-    if !config.matches.is_empty() {
+    showln!(   yellow_bold,
+        "│ ");
+    let config = load_config().unwrap();
+    let config_path = minimo::get!(PathBuf);
+    minimo::showln!(yellow_bold, "│ ", cyan_bold, "┌─ ",white_bold, config_path.display());
+    showln!(yellow_bold, "│ ", cyan_bold, "⇣ ");
+    if !config.matches.is_empty() { 
         for match_rule in &config.matches {
             let (trigger, replace) = match &match_rule.replacement {
                 Replacement::Static { text, .. } => (&match_rule.trigger, text),
@@ -75,7 +87,7 @@ pub fn load_config() -> Result<Config> {
             minimo::showln!(
                 yellow_bold,
                 "│ ",
-                yellow_bold,
+                cyan_bold,
                 "▫ ",
                 gray_dim,
                 trigger,
@@ -91,22 +103,11 @@ pub fn load_config() -> Result<Config> {
         "└───────────────────────────────────────────────────────────────"
     );
     minimo::showln!(gray_dim, "");
-    Ok(config)
+ 
 }
 
 pub fn get_config_path() -> Result<PathBuf> {
-    // let current_dir = env::current_dir()?;
-    // let current_dir_config = current_dir.join("config.yaml");
-    // if current_dir_config.exists() {
-    //     return Ok(current_dir_config);
-    // }
-
-    // if current_dir.file_name().unwrap() == "textra" {
-    //     let config_file = current_dir.join("config.yaml");
-    //     create_default_config(&config_file)?;
-    //     return Ok(config_file);
-    // }
-
+ 
     let home_dir = dirs::document_dir().unwrap();
     let home_config_dir = home_dir.join("textra");
     let home_config_file = home_config_dir.join("config.yaml");
