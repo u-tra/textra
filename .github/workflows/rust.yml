@@ -34,27 +34,52 @@ jobs:
       id: get_tag
       run: |
         $TAG = git describe --tags --abbrev=0
-        echo "TAG=$TAG" >> $env:GITHUB_OUTPUT
+        if ($TAG) {
+          echo "TAG=$TAG" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        } else {
+          echo "No tags found. Exiting."
+          exit 1
+        }
       shell: pwsh
     
     - name: Create Release
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TAG: ${{ steps.get_tag.outputs.TAG }}
       run: |
+        $TAG = "${{ steps.get_tag.outputs.TAG }}"
+        if (-not $TAG) {
+          echo "TAG is not set. Exiting."
+          exit 1
+        }
         gh release create "$TAG" --title "Release $TAG" --notes "Release notes for $TAG"
+      shell: pwsh
       
     - name: Get Project Name
       id: get_project_name
       run: |
         $PROJECT_NAME = (Get-Content .\Cargo.toml | Select-String '^\s*name\s*=\s*"([^"]+)"').Matches.Groups[1].Value
-        echo "PROJECT_NAME=$PROJECT_NAME" >> $env:GITHUB_OUTPUT
+        if ($PROJECT_NAME) {
+          echo "PROJECT_NAME=$PROJECT_NAME" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        } else {
+          echo "Project name not found in Cargo.toml. Exiting."
+          exit 1
+        }
       shell: pwsh
     
     - name: Upload Release Asset
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        TAG: ${{ steps.get_tag.outputs.TAG }}
-        PROJECT_NAME: ${{ steps.get_project_name.outputs.PROJECT_NAME }}
       run: |
-        gh release upload "$TAG" ".\target\release\$PROJECT_NAME.exe"
+        $TAG = "${{ steps.get_tag.outputs.TAG }}"
+        $PROJECT_NAME = "${{ steps.get_project_name.outputs.PROJECT_NAME }}"
+        if (-not $TAG -or -not $PROJECT_NAME) {
+          echo "TAG or PROJECT_NAME is not set. Exiting."
+          exit 1
+        }
+        $ASSET_PATH = ".\target\release\$PROJECT_NAME.exe"
+        if (-not (Test-Path $ASSET_PATH)) {
+          echo "Release asset not found at $ASSET_PATH. Exiting."
+          exit 1
+        }
+        gh release upload "$TAG" "$ASSET_PATH"
+      shell: pwsh
