@@ -1,4 +1,6 @@
 /target
-Cargo.lock
+**/Cargo.lock
 .DS_Store
 .idea
+*.lock
+Cargo.lock
