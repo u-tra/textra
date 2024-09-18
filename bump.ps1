@@ -73,7 +73,7 @@ git push && git push --tags
 
 # Publish the package to crates.io directly
 Write-Output "📦 Attempting to publish package to crates.io..."
-cargo publish
+cargo publish --allow-dirty
 if ($LASTEXITCODE -eq 0) {
     Write-Output "✨ Package successfully published to crates.io!"
 } else {
