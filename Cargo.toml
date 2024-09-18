@@ -1,6 +1,6 @@
 [package]
 name = "textra"
-version = "0.1.62"
+version = "0.1.63"
 edition = "2021"
 authors = ["incredimo <a@xo.rs>"]
 description = "type less, write more"
@@ -41,6 +41,7 @@ tracing-subscriber = "0.3.18"
 which = "6.0.3"
 winapi = { version = "0.3.9", features = ["winuser", "winbase", "tlhelp32", "namedpipeapi"] }
 winreg = "0.52.0"
+
 
 
 

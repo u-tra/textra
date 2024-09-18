@@ -23,6 +23,10 @@ pub const BANNER: &str = r#"
    \____/  \_______|\__/  \__|   \____/ \__|      \_______|
                                                 
 "#;
+
+ 
+
+
 const SERVICE_NAME: &str = "textra";
 const AUTO_START_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 const UNINSTALLER_CODE: &str = r#"
