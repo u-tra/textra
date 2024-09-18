@@ -1,5 +1,4 @@
 use crate::parser::*;
-use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
@@ -24,10 +23,9 @@ use winapi::{
     },
 };
 use std::os::windows::ffi::OsStrExt;
+use super::*;
 
 const CONFIG_FILE_NAME: &str = "config.textra";
-
-// TextraRule and TextraConfig structures are now defined in the parser module
 
 pub fn load_config() -> Result<TextraConfig, ParseError> {
     let config_path = get_config_path().unwrap();
@@ -126,7 +124,7 @@ pub fn create_default_config(path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn watch_config(sender: crossbeam_channel::Sender<Message>) -> Result<(), io::Error> {
+pub fn watch_config(sender: std::sync::mpsc::Sender<Message>) -> Result<(), io::Error> {
     let config_path = get_config_path()?;
     let config_dir = config_path.parent().unwrap();
 
@@ -180,20 +178,8 @@ pub fn watch_config(sender: crossbeam_channel::Sender<Message>) -> Result<(), io
     }
 }
 
-pub static GLOBAL_SENDER: Lazy<Mutex<Option<crossbeam_channel::Sender<Message>>>> =
-    Lazy::new(|| Mutex::new(None));
-
-pub fn set_global_sender(sender: crossbeam_channel::Sender<Message>) {
-    let mut global_sender = GLOBAL_SENDER.lock().unwrap();
-    *global_sender = Some(sender);
-}
-
-#[derive(Debug, Clone)]
-pub enum Message {
-    KeyEvent(DWORD, WPARAM, LPARAM),
-    ConfigReload,
-    Quit,
-}
+// Remove GLOBAL_SENDER and set_global_sender as they're no longer needed
+// with our new implementation
 
 const DEFAULT_CONFIG: &str = r#"
 /// This is a Textra configuration file.

@@ -1,8 +1,7 @@
-#![allow(unused_imports, unused_variables, unused_mut, unused_assignments, unused_must_use,
-    unused)]
+#![allow(unused_imports, unused_variables, unused_mut, unused_assignments, unused_must_use, unused)]
 use anyhow::{Context, Result};
 use chrono::Local;
-use crossbeam_channel::{bounded, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use dirs;
 use minimo::{
     banner::Banner,
@@ -69,7 +68,7 @@ pub fn handle_run() -> Result<()> {
 
 pub fn handle_daemon() -> Result<()> {
     let app_state = Arc::new(AppState::new().context("Failed to create AppState")?);
-    let (sender, receiver) = bounded(100);
+    let (sender, receiver) = channel();
 
     let config_watcher = thread::spawn({
         let sender = sender.clone();
@@ -86,17 +85,14 @@ pub fn handle_daemon() -> Result<()> {
             sender.send(Message::Quit).unwrap();
             config_watcher.join().unwrap().context("Config watcher thread panicked")?;
             keyboard_listener.join().unwrap().context("Keyboard listener thread panicked")?;
-
         }
         Err(e) => {
             sender.send(Message::Quit).unwrap();
             config_watcher.join().unwrap().context("Config watcher thread panicked")?;
             keyboard_listener.join().unwrap().context("Keyboard listener thread panicked")?;
-
+            return Err(e);
         }
     }
-
-
 
     Ok(())
 }

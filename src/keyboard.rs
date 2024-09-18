@@ -1,24 +1,25 @@
-use parking_lot::Mutex;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::time::{Duration, Instant};
-use std::collections::HashMap;
-use crossbeam_channel::{Receiver, Sender};
+use std::collections::{HashMap, VecDeque};
+use std::thread;
+use chrono::Local;
 use winapi::um::winuser::*;
 use winapi::shared::minwindef::*;
 use winapi::ctypes::c_int;
-use std::{thread, ptr, mem};
-use ropey::Rope;
-use chrono::Local;
-use regex::Regex;
-use crate::parser::*;
-use crate::config::*;
+use std::{ptr, mem};
+use std::process::Command;
+
+use crate::{load_config, ParseError, Replacement, TextraConfig};
+
+const MAX_TEXT_LENGTH: usize = 100;
+const KEY_DELAY: u64 = 10;
 
 pub struct AppState {
     config: Arc<Mutex<TextraConfig>>,
-    current_text: Arc<Mutex<Rope>>,
+    current_text: Arc<Mutex<VecDeque<char>>>,
     last_key_time: Arc<Mutex<Instant>>,
     shift_pressed: Arc<AtomicBool>,
+    ctrl_pressed: Arc<AtomicBool>,
     caps_lock_on: Arc<AtomicBool>,
     killswitch: Arc<AtomicBool>,
 }
@@ -29,16 +30,24 @@ impl AppState {
 
         Ok(Self {
             config: Arc::new(Mutex::new(config)),
-            current_text: Arc::new(Mutex::new(Rope::new())),
+            current_text: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_TEXT_LENGTH))),
             last_key_time: Arc::new(Mutex::new(Instant::now())),
             shift_pressed: Arc::new(AtomicBool::new(false)),
+            ctrl_pressed: Arc::new(AtomicBool::new(false)),
             caps_lock_on: Arc::new(AtomicBool::new(false)),
             killswitch: Arc::new(AtomicBool::new(false)),
         })
     }
 }
 
-pub fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Clone, Copy)]
+pub enum Message {
+    KeyEvent(DWORD, WPARAM, LPARAM),
+    ConfigReload,
+    Quit,
+}
+
+pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<Message>) -> anyhow::Result<()> {
     while let Ok(msg) = receiver.recv() {
         match msg {
             Message::KeyEvent(vk_code, w_param, l_param) => {
@@ -57,29 +66,35 @@ pub fn main_loop(app_state: Arc<AppState>, receiver: &Receiver<Message>) -> Resu
     Ok(())
 }
 
+static mut GLOBAL_SENDER: Option<std::sync::mpsc::Sender<Message>> = None;
+static GENERATING: AtomicBool = AtomicBool::new(false);
+
 unsafe extern "system" fn keyboard_hook_proc(
     code: i32,
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
-    if code >= 0 && !listener_is_blocked() {
+    if code >= 0 && !GENERATING.load(Ordering::SeqCst) {
         let kb_struct = *(l_param as *const KBDLLHOOKSTRUCT);
         let vk_code = kb_struct.vkCode;
 
-        if let Some(sender) = GLOBAL_SENDER.lock().unwrap().as_ref() {
-            let _ = sender.try_send(Message::KeyEvent(vk_code, w_param, l_param));
+        if let Some(sender) = &GLOBAL_SENDER {
+            let _ = sender.send(Message::KeyEvent(vk_code, w_param, l_param));
         }
     }
 
     CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
 }
 
-pub fn listen_keyboard(sender: Sender<Message>) -> Result<(), Box<dyn std::error::Error>> {
-    set_global_sender(sender);
+pub fn listen_keyboard(sender: std::sync::mpsc::Sender<Message>) -> anyhow::Result<()> {
+    unsafe {
+        GLOBAL_SENDER = Some(sender);
+    }
+    
     unsafe {
         let hook = SetWindowsHookExA(WH_KEYBOARD_LL, Some(keyboard_hook_proc), ptr::null_mut(), 0);
         if hook.is_null() {
-            return Err(Box::new(std::io::Error::last_os_error()));
+            return Err(anyhow::anyhow!("Failed to set keyboard hook: {}", std::io::Error::last_os_error()));
         }
         let mut msg: MSG = mem::zeroed();
         while GetMessageA(&mut msg, ptr::null_mut(), 0, 0) > 0 {
@@ -124,36 +139,53 @@ fn handle_key_event(
     vk_code: DWORD,
     w_param: WPARAM,
     l_param: LPARAM,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let now = Instant::now();
 
     match w_param as u32 {
         WM_KEYDOWN | WM_SYSKEYDOWN => {
-            let mut last_key_time = app_state.last_key_time.lock();
+            let mut last_key_time = app_state.last_key_time.lock().unwrap();
             if now.duration_since(*last_key_time) > Duration::from_millis(1000) {
-                app_state.current_text.lock().remove(..);
+                app_state.current_text.lock().unwrap().clear();
             }
             *last_key_time = now;
 
             match vk_code as i32 {
                 VK_ESCAPE => {
-                    app_state.killswitch.store(true, std::sync::atomic::Ordering::SeqCst);
+                    app_state.killswitch.store(true, Ordering::SeqCst);
                 }
                 VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
-                    app_state.shift_pressed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    app_state.shift_pressed.store(true, Ordering::SeqCst);
+                }
+                VK_CONTROL | VK_LCONTROL | VK_RCONTROL => {
+                    app_state.ctrl_pressed.store(true, Ordering::SeqCst);
                 }
                 VK_CAPITAL => {
-                    let current = app_state.caps_lock_on.load(std::sync::atomic::Ordering::SeqCst);
-                    app_state.caps_lock_on.store(!current, std::sync::atomic::Ordering::SeqCst);
+                    let current = app_state.caps_lock_on.load(Ordering::SeqCst);
+                    app_state.caps_lock_on.store(!current, Ordering::SeqCst);
+                }
+                VK_BACK => {
+                    app_state.current_text.lock().unwrap().pop_back();
                 }
                 _ => {
-                    if let Some(c) = get_char_from_vk(
+                    if app_state.ctrl_pressed.load(Ordering::SeqCst) {
+                        // Handle Ctrl+V (paste) operation
+                        if vk_code as i32 == 'V' as i32 {
+                            // For simplicity, we're not actually pasting here.
+                            // In a real implementation, you'd want to get the clipboard content
+                            // and add it to current_text.
+                            app_state.current_text.lock().unwrap().clear();
+                        }
+                    } else if let Some(c) = get_char_from_vk(
                         vk_code as i32,
-                        app_state.shift_pressed.load(std::sync::atomic::Ordering::SeqCst),
+                        app_state.shift_pressed.load(Ordering::SeqCst),
+                        app_state.caps_lock_on.load(Ordering::SeqCst),
                     ) {
-                        let mut current_text = app_state.current_text.lock();
-                        let txtlen = current_text.len_chars();
-                        current_text.insert(txtlen, &c.to_string());
+                        let mut current_text = app_state.current_text.lock().unwrap();
+                        current_text.push_back(c);
+                        if current_text.len() > MAX_TEXT_LENGTH {
+                            current_text.pop_front();
+                        }
                         check_and_replace(&app_state, &mut current_text)?;
                     }
                 }
@@ -161,10 +193,13 @@ fn handle_key_event(
         }
         WM_KEYUP | WM_SYSKEYUP => match vk_code as i32 {
             VK_SHIFT | VK_LSHIFT | VK_RSHIFT => {
-                app_state.shift_pressed.store(false, std::sync::atomic::Ordering::SeqCst);
+                app_state.shift_pressed.store(false, Ordering::SeqCst);
+            }
+            VK_CONTROL | VK_LCONTROL | VK_RCONTROL => {
+                app_state.ctrl_pressed.store(false, Ordering::SeqCst);
             }
             VK_ESCAPE => {
-                app_state.killswitch.store(false, std::sync::atomic::Ordering::SeqCst);
+                app_state.killswitch.store(false, Ordering::SeqCst);
             }
             _ => {}
         },
@@ -174,11 +209,14 @@ fn handle_key_event(
     Ok(())
 }
 
-fn get_char_from_vk(vk_code: i32, shift_pressed: bool) -> Option<char> {
+fn get_char_from_vk(vk_code: i32, shift_pressed: bool, caps_lock_on: bool) -> Option<char> {
     unsafe {
         let mut keyboard_state: [u8; 256] = std::mem::zeroed();
         if shift_pressed {
             keyboard_state[VK_SHIFT as usize] = 0x80;
+        }
+        if caps_lock_on {
+            keyboard_state[VK_CAPITAL as usize] = 0x01;
         }
         GetKeyboardState(keyboard_state.as_mut_ptr());
 
@@ -208,9 +246,9 @@ fn get_char_from_vk(vk_code: i32, shift_pressed: bool) -> Option<char> {
     }
 }
 
-fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<(), Box<dyn std::error::Error>> {
-    let immutable_current_text = current_text.to_string();
-    let config = app_state.config.lock();
+fn check_and_replace(app_state: &AppState, current_text: &mut VecDeque<char>) -> anyhow::Result<()> {
+    let immutable_current_text: String = current_text.iter().collect();
+    let config = app_state.config.lock().unwrap();
     for rule in &config.rules {
         for trigger in &rule.triggers {
             if immutable_current_text.ends_with(trigger) {
@@ -236,7 +274,7 @@ fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()
                         )?;
                     }
                     Replacement::Code { language, content } => {
-                        let replacement = process_code_replacement(language, content);
+                        let replacement = process_code_replacement(language, content)?;
                         perform_replacement(
                             current_text,
                             trigger,
@@ -254,30 +292,28 @@ fn check_and_replace(app_state: &AppState, current_text: &mut Rope) -> Result<()
     Ok(())
 }
 
-const KEY_DELAY: u64 = 10;
-
 fn perform_replacement(
-    current_text: &mut Rope,
+    current_text: &mut VecDeque<char>,
     original: &str,
     replacement: &str,
     propagate_case: bool,
     dynamic: bool,
     app_state: &AppState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     let final_replacement = if dynamic {
-        replacement.to_string()
+        process_dynamic_replacement(replacement)
     } else if propagate_case {
         propagate_case_fn(original, replacement)
     } else {
         replacement.to_string()
     };
 
-    if app_state.killswitch.load(std::sync::atomic::Ordering::SeqCst) {
+    if app_state.killswitch.load(Ordering::SeqCst) {
         return Ok(());
     }
 
     // Block the listener before simulating key presses
-    block_listener();
+    GENERATING.store(true, Ordering::SeqCst);
 
     // Backspace the original text
     let backspace_count = original.chars().count();
@@ -289,19 +325,68 @@ fn perform_replacement(
     simulate_key_presses(&vk_codes, KEY_DELAY);
 
     // Unblock the listener after simulating key presses
-    unblock_listener();
+    GENERATING.store(false, Ordering::SeqCst);
 
-    let start = current_text.len_chars() - original.len();
-    current_text.remove(start..current_text.len_chars());
-    current_text.insert(start, &final_replacement);
+    // Update current_text
+    for _ in 0..original.len() {
+        current_text.pop_back();
+    }
+    for c in final_replacement.chars() {
+        current_text.push_back(c);
+        if current_text.len() > MAX_TEXT_LENGTH {
+            current_text.pop_front();
+        }
+    }
 
     Ok(())
 }
 
-fn process_code_replacement(language: &str, code: &str) -> String {
-    // This is a placeholder. In a real implementation, you'd want to actually execute the code.
-    // For safety reasons, we're just returning the code as a string here.
-    format!("Code execution result ({}): {}", language, code)
+fn process_code_replacement(language: &str, code: &str) -> anyhow::Result<String> {
+    match language.to_lowercase().as_str() {
+        "python" => {
+            let output = Command::new("python")
+                .arg("-c")
+                .arg(code)
+                .output()?;
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        "javascript" => {
+            let output = Command::new("node")
+                .arg("-e")
+                .arg(code)
+                .output()?;
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        "rust" => {
+            // For Rust, we'll need to create a temporary file, compile it, and run it
+            use std::fs::File;
+            use std::io::Write;
+            use tempfile::Builder;
+
+            let dir = Builder::new().prefix("rust_exec").tempdir()?;
+            let file_path = dir.path().join("main.rs");
+            let mut file = File::create(&file_path)?;
+            writeln!(file, "fn main() {{")?;
+            writeln!(file, "    {}", code)?;
+            writeln!(file, "}}")?;
+            file.flush()?;
+
+            let output = Command::new("rustc")
+                .arg(&file_path)
+                .arg("-o")
+                .arg(dir.path().join("output"))
+                .output()?;
+
+            if !output.status.success() {
+                return Ok(String::from_utf8_lossy(&output.stderr).to_string());
+            }
+
+            let output = Command::new(dir.path().join("output"))
+                .output()?;
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        }
+        _ => Err(anyhow::anyhow!("Unsupported language: {}", language)),
+    }
 }
 
 fn propagate_case_fn(original: &str, replacement: &str) -> String {
@@ -318,8 +403,16 @@ fn propagate_case_fn(original: &str, replacement: &str) -> String {
     }
 }
 
+fn process_dynamic_replacement(replacement: &str) -> String {
+    match replacement.to_lowercase().as_str() {
+        "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
+        "{{time}}" => Local::now().format("%H:%M:%S").to_string(),
+        _ => replacement.to_string(),
+    }
+}
+
 fn reload_config(app_state: Arc<AppState>) -> Result<(), ParseError> {
-    let mut config = app_state.config.lock();
+    let mut config = app_state.config.lock().unwrap();
     *config = load_config()?;
     Ok(())
 }
@@ -356,11 +449,10 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
 
     // Send inputs in batches
     for chunk in inputs.chunks(batch_size) {
-    let mut chunky = chunk.as_ptr();
         unsafe {
             SendInput(
                 chunk.len() as u32,
-                chunky as *mut winapi::um::winuser::INPUT,
+                chunk.as_ptr() as *mut winapi::um::winuser::INPUT,
                 std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
             );
         }
@@ -386,43 +478,41 @@ fn char_to_vk_code(c: char) -> i32 {
     }
 }
 
-fn listener_is_blocked() -> bool {
-    GENERATING.load(std::sync::atomic::Ordering::SeqCst)
+// Error handling
+#[derive(Debug)]
+pub enum TextraError {
+    ConfigError(ParseError),
+    IoError(std::io::Error),
+    ExecutionError(String),
 }
 
-fn block_listener() {
-    GENERATING.store(true, std::sync::atomic::Ordering::SeqCst);
+impl std::fmt::Display for TextraError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            TextraError::ConfigError(e) => write!(f, "Configuration error: {}", e),
+            TextraError::IoError(e) => write!(f, "I/O error: {}", e),
+            TextraError::ExecutionError(e) => write!(f, "Execution error: {}", e),
+        }
+    }
 }
 
-fn unblock_listener() {
-    GENERATING.store(false, std::sync::atomic::Ordering::SeqCst);
+impl std::error::Error for TextraError {}
+
+impl From<ParseError> for TextraError {
+    fn from(error: ParseError) -> Self {
+        TextraError::ConfigError(error)
+    }
 }
 
-lazy_static::lazy_static! {
-    static ref GENERATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-}
-
-
-
-// Additional helper functions
-
-fn execute_javascript(code: &str) -> String {
-    // This is a placeholder. In a real implementation, you'd want to use a JavaScript engine.
-    // For safety reasons, we're just returning the code as a string here.
-    format!("JavaScript execution result: {}", code)
-}
-
-fn process_dynamic_replacement(replacement: &str) -> String {
-    match replacement.to_lowercase().as_str() {
-        "{{date}}" => Local::now().format("%Y-%m-%d").to_string(),
-        "{{time}}" => Local::now().format("%H:%M:%S").to_string(),
-        _ => replacement.to_string(),
+impl From<std::io::Error> for TextraError {
+    fn from(error: std::io::Error) -> Self {
+        TextraError::IoError(error)
     }
 }
 
 // Main function to tie everything together
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let (sender, receiver) = crossbeam_channel::unbounded();
+pub fn run() -> anyhow::Result<()> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     let app_state = Arc::new(AppState::new()?);
 
     // Start the config watcher in a separate thread
@@ -450,49 +540,37 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// Additional structures and implementations
+fn watch_config(sender: std::sync::mpsc::Sender<Message>) -> anyhow::Result<()> {
+    use notify::{Watcher, RecursiveMode};
+    use std::path::Path;
+
+    let (tx, rx) = std::sync::mpsc::channel();
+
+    let mut watcher = notify::recommended_watcher(tx)?;
+
+    watcher.watch(Path::new("config.toml"), RecursiveMode::NonRecursive)?;
+
+    loop {
+        match rx.recv() {
+            Ok(_) => {
+                // Config file changed, send reload message
+                sender.send(Message::ConfigReload)?;
+            },
+            Err(e) => println!("watch error: {:?}", e),
+        }
+    }
+}
 
 impl std::fmt::Debug for AppState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AppState")
             .field("config", &"[TextraConfig]")
-            .field("current_text", &"[Rope]")
+            .field("current_text", &"[VecDeque<char>]")
             .field("last_key_time", &self.last_key_time)
             .field("shift_pressed", &self.shift_pressed)
+            .field("ctrl_pressed", &self.ctrl_pressed)
             .field("caps_lock_on", &self.caps_lock_on)
             .field("killswitch", &self.killswitch)
             .finish()
-    }
-}
-
-// Error handling
-#[derive(Debug)]
-pub enum TextraError {
-    ConfigError(ParseError),
-    IoError(std::io::Error),
-    // Add other error types as needed
-}
-
-impl std::fmt::Display for TextraError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            TextraError::ConfigError(e) => write!(f, "Configuration error: {}", e),
-            TextraError::IoError(e) => write!(f, "I/O error: {}", e),
-            // Handle other error types
-        }
-    }
-}
-
-impl std::error::Error for TextraError {}
-
-impl From<ParseError> for TextraError {
-    fn from(error: ParseError) -> Self {
-        TextraError::ConfigError(error)
-    }
-}
-
-impl From<std::io::Error> for TextraError {
-    fn from(error: std::io::Error) -> Self {
-        TextraError::IoError(error)
     }
 }
