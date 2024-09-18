@@ -1,19 +1,10 @@
-use nom::{
-    branch::alt,
-    bytes::complete::{tag, take_until, take_while1},
-    character::complete::{char, line_ending, multispace0, space0},
-    combinator::{all_consuming, opt},
-    error::{VerboseError, VerboseErrorKind},
-    multi::many0,
-    sequence::delimited,
-    IResult,
-};
+use crate::parser::*;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::{fmt, os::windows::ffi::OsStrExt};
 use std::{mem, ptr};
 use winapi::{
     shared::minwindef::{DWORD, FALSE, LPARAM, LPVOID, WPARAM},
@@ -32,32 +23,17 @@ use winapi::{
         },
     },
 };
-use super::*;
-use crate::parse::ParseError;
+use std::os::windows::ffi::OsStrExt;
+
 const CONFIG_FILE_NAME: &str = "config.textra";
 
-#[derive(Debug, Default, Clone)]
-pub struct Config {
-    pub matches: Vec<Match>,
-}
+// TextraRule and TextraConfig structures are now defined in the parser module
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Match {
-    pub trigger: String,
-    pub replacement: Replacement,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Replacement {
-    Static { text: String },
-    Dynamic { action: String },
-}
-
-pub fn load_config() -> Result<Config, ParseError> {
+pub fn load_config() -> Result<TextraConfig, ParseError> {
     let config_path = get_config_path().unwrap();
     let config_str = fs::read_to_string(&config_path)
         .expect(&format!("Failed to read config file: {:?}", config_path));
-    Config::parse(&config_str)
+    parse_textra_config(&config_str)
 }
 
 pub fn handle_edit_config() -> Result<(), io::Error> {
@@ -84,7 +60,7 @@ pub fn display_config() {
     minimo::showln!(yellow_bold, "│ ");
     match load_config() {
         Ok(config) => {
-            let config_path =  get_config_path().unwrap();
+            let config_path = get_config_path().unwrap();
             minimo::showln!(
                 yellow_bold,
                 "│ ",
@@ -94,11 +70,12 @@ pub fn display_config() {
                 config_path.display()
             );
             minimo::showln!(yellow_bold, "│ ", cyan_bold, "⇣ ");
-            if !config.matches.is_empty() {
-                for match_rule in &config.matches {
-                    let (trigger, replace) = match &match_rule.replacement {
-                        Replacement::Static { text } => (&match_rule.trigger, text),
-                        Replacement::Dynamic { action } => (&match_rule.trigger, action),
+            if !config.rules.is_empty() {
+                for rule in &config.rules {
+                    let (trigger, replace) = match &rule.replacement {
+                        Replacement::Simple(text) => (&rule.triggers[0], text),
+                        Replacement::Multiline(text) => (&rule.triggers[0], text),
+                        Replacement::Code { language: _, content } => (&rule.triggers[0], content),
                     };
                     let trimmed = minimo::text::chop(replace, 50 - trigger.len())[0].clone();
 
@@ -218,30 +195,29 @@ pub enum Message {
     Quit,
 }
 
- 
-
 const DEFAULT_CONFIG: &str = r#"
-// this is textra config file
-// you can add your own triggers and replacements here
-// when you type the text before `=>` it will be replaced with the text that follows
-// it's as simple as that!
-
+/// This is a Textra configuration file.
+/// You can add your own triggers and replacements here.
+/// When you type the text before `=>` it will be replaced with the text that follows.
+/// It's as simple as that!
 
 btw => by the way
-:date => {date.now()}
-:time => {time.now()}
+:date => ```javascript
+    return format.date(date.now(), "YYYY-MM-DD");
+```
+:time => ```javascript
+    return format.date(date.now(), "HH:mm:ss");
+```
 :email => example@example.com
-:psswd => 0nceUpon@TimeInPluto  
+:psswd => 0nceUpon@TimeInPluto
 pfa => please find the attached information as requested
 pftb => please find the below information as required
 :tst => `twinkle twinkle little star, how i wonder what you are,
 up above the world so high,
 like a diamond in the sky`
 ccc => continue writing complete code without skipping anything
-//we can also write complex code that we want to execute
-
-:ping => [javascript]{
+:ping => ```javascript
     let pr = await network.ping("www.google.com");
-    return "I pinged Google and it responded $pr";
-}
+    return "I pinged Google and it responded " + pr;
+```
 "#;

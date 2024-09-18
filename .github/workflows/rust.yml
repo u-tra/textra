@@ -1,57 +1,71 @@
-name: Rust Windows Build and Release
+name: textra release
+
 on:
   push:
-    branches: [ "master" ]
-  pull_request:
-    branches: [ "master" ]
+    branches:
+      - main
 
-env:
-  CARGO_TERM_COLOR: always
+permissions:
+  contents: write
 
 jobs:
-  build:
-    runs-on: windows-latest
+
+  create-release:
     if: contains(github.event.head_commit.message, 'release')
+    runs-on: ubuntu-latest
+    outputs:
+      release_upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
-    - uses: actions/checkout@v4
-      with:
-        fetch-depth: 0  # Fetch all history for all tags and branches
-    
-    - name: Set up Rust
-      uses: actions-rs/toolchain@v1
-      with:
-        profile: minimal
-        toolchain: stable
-        override: true
-    
-    - name: Run tests
-      run: cargo test --verbose
-    
-    - name: Build
-      run: cargo build --release
-    
-    - name: Get latest tag
-      id: get_tag
-      run: echo "TAG=$(git describe --tags --abbrev=0)" >> $GITHUB_OUTPUT
-      shell: bash
-    
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ steps.get_tag.outputs.TAG }}
-        release_name: Release ${{ steps.get_tag.outputs.TAG }}
-        draft: false
-        prerelease: false
-    
-    - name: Upload Release Asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./target/release/textra.exe
-        asset_name: your_executable_name.exe
-        asset_content_type: application/octet-stream
+      - name: Determine Release Tag
+        id: release_tag
+        run: |
+          echo "RELEASE_TAG=v$(date +'%Y.%m.%d.%H%M%S')" >> $GITHUB_ENV
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          release_name: textra 🚀 release ${{ env.RELEASE_TAG }}
+          draft: false
+          prerelease: false
+
+  release:
+    needs: create-release
+    if: contains(github.event.head_commit.message, 'release')
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Cache Cargo Registry and Target Directory
+        uses: actions/cache@v2
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build Rust Project
+        run: cargo build --release --bin textra
+
+      - name: Upload Artifact to Release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.release_upload_url }}
+          asset_path: ./target/release/textra.exe
+          asset_name: textra-windows.exe
+          asset_content_type: application/octet-stream

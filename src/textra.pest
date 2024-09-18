@@ -1,0 +1,22 @@
+file = { SOI ~ (metadata | documentation | rule)* ~ EOI }
+
+metadata      = { "///" ~ key ~ ":" ~ value ~ NEWLINE }
+documentation = { "///" ~ (!NEWLINE ~ ANY)+ ~ NEWLINE }
+rule          = { triggers ~ "=>" ~ replacement ~ NEWLINE? }
+
+key   = @{ (ASCII_ALPHANUMERIC | "_")+ }
+value = @{ (!NEWLINE ~ ANY)* }
+
+triggers =  { trigger ~ ("|" ~ trigger)* }
+trigger  = @{ ":" ~ ASCII_ALPHANUMERIC+ | ASCII_ALPHANUMERIC+ }
+
+replacement           =  { code_replacement | multiline_replacement | simple_replacement }
+simple_replacement    = @{ (!NEWLINE ~ ANY)+ }
+multiline_replacement =  { "`" ~ multiline_content ~ "`" }
+multiline_content     = @{ (!("`" | NEWLINE) ~ ANY)* ~ (NEWLINE ~ (!("`" | NEWLINE) ~ ANY)*)* }
+code_replacement      =  { "```" ~ language   ~ code_content ~ "```" }
+language              = @{ ASCII_ALPHA+ ~ NEWLINE }
+code_content          = @{ (!("```") ~ ANY)*}
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT    = _{ "//" ~ (!NEWLINE ~ ANY)* ~ NEWLINE }

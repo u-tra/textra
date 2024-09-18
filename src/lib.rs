@@ -1,72 +1,51 @@
-mod config;
-pub mod keyboard;
-pub mod parse;
-pub mod installer;
-pub use config::*;
-pub use installer::*;
-pub use keyboard::listen_keyboard;
-pub use keyboard::main_loop;
-use keyboard::AppState;
- 
- 
- pub use crossbeam_channel::*;
-pub use ropey::Rope;
-use std::sync::Arc;
-pub use std::time::Instant;
-pub use std::io;
-pub use std::sync::atomic::AtomicBool;
-pub use std::sync::atomic::AtomicUsize;
-pub use std::sync::atomic::Ordering;
-pub use std::sync::atomic::AtomicU64;
-pub use std::sync::atomic::AtomicI64;
-pub use std::sync::atomic::AtomicI32;
-pub use std::sync::atomic::AtomicI16;
-
-
-pub use anyhow::{Context, Result};
-pub use chrono::Local;
-pub use config::{Config, Message, Replacement, GLOBAL_SENDER};
-pub use crossbeam_channel::{bounded, Receiver, Sender};
-pub use dirs;
-pub use minimo::banner::Banner;
-
-pub use minimo::{
-    cyan_bold, divider, divider_vibrant, gray_dim, green_bold, orange_bold, showln, white_bold,
+#![allow(unused_imports, unused_variables, unused_mut, unused_assignments, unused_must_use,
+    unused)]
+use anyhow::{Context, Result};
+use chrono::Local;
+use crossbeam_channel::{bounded, Receiver, Sender};
+use dirs;
+use minimo::{
+    banner::Banner,
+    cyan_bold, divider, divider_vibrant, gray_dim, green_bold, orange_bold, red_bold, showln, white_bold,
     yellow_bold, Stylable,
 };
- 
-pub use regex::Regex;
-pub use ropey::*;
-pub use serde::{Deserialize, Serialize};
-pub use std::collections::HashMap;
-pub use std::ffi::{c_int, OsString};
-pub use std::io::Write;
-pub use std::mem::MaybeUninit;
-pub use std::os::windows::ffi::{OsStrExt, OsStringExt};
-pub use std::os::windows::process::CommandExt;
-pub use std::process::{exit, Command};
-pub use std::time::{Duration};
-pub use std::{env, fs, mem, ptr, thread};
-pub use winapi::shared::minwindef::{DWORD, LPARAM, LRESULT, WPARAM};
-pub use winapi::um::handleapi::*;
-pub use winapi::um::minwinbase::STILL_ACTIVE;
-pub use winapi::um::processthreadsapi::{GetExitCodeProcess, OpenProcess, TerminateProcess};
-pub use winapi::um::synchapi::WaitForSingleObject;
-pub use winapi::um::tlhelp32::{
-    CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS,
+use regex::Regex;
+use ropey::Rope;
+use std::{
+    env, fs, io, mem, ptr, thread,
+    time::{Duration, Instant},
+    sync::{Arc, atomic::{AtomicBool, Ordering}},
+    collections::HashMap,
+    ffi::{c_int, OsString},
+    os::windows::ffi::{OsStrExt, OsStringExt},
+    os::windows::process::CommandExt,
+    process::{exit, Command},
 };
-pub use winapi::um::wincon::FreeConsole;
+use winapi::{
+    shared::minwindef::{DWORD, LPARAM, LRESULT, WPARAM},
+    um::{
+        handleapi::*, minwinbase::STILL_ACTIVE,
+        processthreadsapi::{GetExitCodeProcess, OpenProcess, TerminateProcess},
+        synchapi::WaitForSingleObject,
+        tlhelp32::{CreateToolhelp32Snapshot, Process32First, Process32Next, PROCESSENTRY32, TH32CS_SNAPPROCESS},
+        wincon::FreeConsole,
+        winbase::*, winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE},
+        winuser::*,
+    },
+};
+use winreg::{enums::*, RegKey};
 
-pub use winapi::um::winbase::*;
-pub use winapi::um::winnt::{HANDLE, PROCESS_QUERY_INFORMATION, PROCESS_TERMINATE};
-pub use winapi::um::winuser::*;
-pub use winreg::enums::*;
-pub use winreg::RegKey;
-pub use minimo::*;
+mod parser;
+pub mod config;
+pub mod keyboard;
+pub mod installer;
+
+use crate::parser::*;
+use crate::config::*;
+use crate::keyboard::*;
+
 const SERVICE_NAME: &str = "Textra";
 const MUTEX_NAME: &str = "Global\\TextraRunning";
-
-
 
 pub fn handle_run() -> Result<()> {
     if is_service_running() {
@@ -89,30 +68,35 @@ pub fn handle_run() -> Result<()> {
 }
 
 pub fn handle_daemon() -> Result<()> {
-    //to avoid any kind of duplicate daemon we will only run if this is being executed from user_home/.textra/textra.exe
- 
-    // if is_running_from_install_dir() {
-    //    showln!(orange_bold,"This is a standalone application and should not be run as a daemon. If you want to run Textra as a daemon, please use the 'textra run' command.");
-    //    return Ok(());
-    // }
-    let app_state = Arc::new(AppState::new()?);
+    let app_state = Arc::new(AppState::new().context("Failed to create AppState")?);
     let (sender, receiver) = bounded(100);
 
     let config_watcher = thread::spawn({
         let sender = sender.clone();
-        move || config::watch_config(sender)
+        move || watch_config(sender).map_err(|e| anyhow::anyhow!("Config watcher error: {}", e))
     });
 
     let keyboard_listener = thread::spawn({
         let sender = sender.clone();
-        move || listen_keyboard(sender)
+        move || listen_keyboard(sender).map_err(|e| anyhow::anyhow!("Keyboard listener error: {}", e))
     });
 
-    main_loop(app_state, &receiver)?;
+    match main_loop(app_state, &receiver) {
+        Ok(_) => {
+            sender.send(Message::Quit).unwrap();
+            config_watcher.join().unwrap().context("Config watcher thread panicked")?;
+            keyboard_listener.join().unwrap().context("Keyboard listener thread panicked")?;
 
-    sender.send(Message::Quit).unwrap();
-    config_watcher.join().unwrap()?;
-    keyboard_listener.join().unwrap()?;
+        }
+        Err(e) => {
+            sender.send(Message::Quit).unwrap();
+            config_watcher.join().unwrap().context("Config watcher thread panicked")?;
+            keyboard_listener.join().unwrap().context("Keyboard listener thread panicked")?;
+
+        }
+    }
+
+
 
     Ok(())
 }
@@ -154,7 +138,6 @@ pub fn handle_stop() -> Result<()> {
 
                 if Process32Next(snapshot, &mut entry) == 0 {
                     break;
-                    //dont do anything
                 }
             }
         }
@@ -188,10 +171,8 @@ pub fn is_service_running() -> bool {
                     &bytes[..bytes.iter().position(|&x| x == 0).unwrap_or(260)],
                 );
 
-                if name.to_lowercase() == "textra.exe" && entry.th32ProcessID != current_pid as u32
-                {
-                    let process_handle =
-                        OpenProcess(PROCESS_QUERY_INFORMATION, 0, entry.th32ProcessID);
+                if name.to_lowercase() == "textra.exe" && entry.th32ProcessID != current_pid as u32 {
+                    let process_handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, entry.th32ProcessID);
                     if !process_handle.is_null() {
                         let mut exit_code: DWORD = 0;
                         if GetExitCodeProcess(process_handle, &mut exit_code) != 0 {
@@ -212,4 +193,25 @@ pub fn is_service_running() -> bool {
     }
 
     textra_count >= 1
+}
+
+pub fn main() -> Result<()> {
+    let args: Vec<String> = env::args().collect();
+
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "run" => handle_run()?,
+            "stop" => handle_stop()?,
+            "daemon" => handle_daemon()?,
+            "edit" => handle_edit_config()?,
+            "config" => display_config(),
+            _ => {
+                showln!(orange_bold, "Invalid command. Use 'run', 'stop', 'edit', or 'config'.");
+            }
+        }
+    } else {
+        showln!(orange_bold, "Please specify a command: 'run', 'stop', 'edit', or 'config'.");
+    }
+
+    Ok(())
 }

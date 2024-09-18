@@ -3,18 +3,26 @@
     unused_variables,
     unused_mut,
     unused_assignments,
-    unused_imports
+
+
 )]
 
-use textra::*;
+use std::env;
 
- 
+use minimo::*;
+use installer::*;
+use textra::*;
+use textra::config::*;
+use textra::keyboard::*;
+use anyhow::Result;
+
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() == 1 {
-        return display_help();
+         display_help();
+         return Ok(());
     }
 
     match args[1].as_str() {
@@ -30,11 +38,13 @@ fn main() -> Result<()> {
         _ => {
             match auto_install() {
                 Ok(_) => {
-                    display_help() 
+                    display_help();
+                    return Ok(());
                 },
                 Err(e) => {
                     eprintln!("Error: {}", e);
-                    display_help()
+                    display_help();
+                    return Ok(());
                 }
             }
         }
@@ -43,7 +53,7 @@ fn main() -> Result<()> {
 
 
 
-fn handle_display_status() -> Result<()> {
+fn handle_display_status() {
     if is_service_running() {
         showln!(
             yellow_bold,
@@ -82,10 +92,9 @@ fn handle_display_status() -> Result<()> {
             "disabled."
         );
     }
-    Ok(())
 }
 
-fn display_help() -> Result<()> {
+fn display_help() {
     BANNER.show(white_bold);
     divider();
     showln!(
@@ -97,7 +106,7 @@ fn display_help() -> Result<()> {
         " ──────────"
     );
     showln!(yellow_bold, "│ ");
-    handle_display_status()?;
+    handle_display_status();
     showln!(yellow_bold, "│ ");
     showln!(yellow_bold, "│ ", whitebg, " HOW TO USE ");
     showln!(yellow_bold, "│ ");
@@ -152,5 +161,4 @@ fn display_help() -> Result<()> {
     showln!(yellow_bold, "│ ");
 
     display_config();
-    Ok(())
 }

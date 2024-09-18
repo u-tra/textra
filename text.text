@@ -1,0 +1,44 @@
+/// Hi there!
+/// this is a textra configuration file.
+/// here you can write rules like `if i type "x" then replace it with "y"`
+/// where x is called the trigger and y is the replacement.
+/// we write such rules in the form of `trigger => replacement`
+/// for example, if i i want to replace "btw" with "by the way" i would write
+/// btw => by the way
+/// that's it. as simple as that!
+/// we have written a few rules for you to get you started. but feel free to add more.
+/// lines starting with `//` are comments and will be ignored.
+
+
+
+btw => by the way
+pfa => please find the attached information as requested
+pftb => please find the below information as required
+ccc => continue writing complete code without skipping even a single line.
+wcc => write complete code without skipping even a single line.
+fff => fix all the errors in the code
+/// you can mention multiple triggers in one go like below
+:email | :mail => a@xo.rs  // this will work for both :email and :mail
+
+/// if you want to write replacements that are more than one line,
+/// you can put it inbetween ` like below
+:tst => `twinkle twinkle little star, how i wonder what you are,
+up above the world so high,
+like a diamond in the sky`
+
+/// textra also supports code execution using
+/// a special syntax. you can write code that will be executed
+/// and the result will be inserted in the document.
+/// for example, if i want to write the current date and time
+/// i can write the following
+:date => ```javascript
+    return format.date(date.now(), "YYYY-MM-DD");
+```
+
+/// similarly, for time
+:time => ```javascript
+    return format.date(date.now(), "HH:mm:ss");
+```
+:ip => ```powershell
+Invoke-WebRequest -Uri "https://api.ipify.org/?format=json" | ConvertFrom-Json | Select -ExpandProperty ip
+```
