@@ -3,42 +3,23 @@ use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use std::thread;
 use chrono::Local;
-use winapi::um::winuser::*;
+use winapi::um::{libloaderapi::GetModuleHandleW, winuser::*};
+use winapi::um::wingdi::*;
 use winapi::shared::minwindef::*;
+use winapi::shared::windef::*;
 use winapi::ctypes::c_int;
 use std::{ptr, mem};
 use std::process::Command;
+use std::ffi::OsStr;
+use std::os::windows::ffi::OsStrExt;
+use notify::{Watcher, RecursiveMode};
+use std::path::Path;
+use anyhow::Result;
 
-use crate::{load_config, ParseError, Replacement, TextraConfig};
+use crate::{load_config, view, watch_config, AppState, Replacement, TextraConfig, MAX_TEXT_LENGTH};
 
-const MAX_TEXT_LENGTH: usize = 100;
+
 const KEY_DELAY: u64 = 10;
-
-pub struct AppState {
-    config: Arc<Mutex<TextraConfig>>,
-    current_text: Arc<Mutex<VecDeque<char>>>,
-    last_key_time: Arc<Mutex<Instant>>,
-    shift_pressed: Arc<AtomicBool>,
-    ctrl_pressed: Arc<AtomicBool>,
-    caps_lock_on: Arc<AtomicBool>,
-    killswitch: Arc<AtomicBool>,
-}
-
-impl AppState {
-    pub fn new() -> Result<Self, ParseError> {
-        let config = load_config()?;
-
-        Ok(Self {
-            config: Arc::new(Mutex::new(config)),
-            current_text: Arc::new(Mutex::new(VecDeque::with_capacity(MAX_TEXT_LENGTH))),
-            last_key_time: Arc::new(Mutex::new(Instant::now())),
-            shift_pressed: Arc::new(AtomicBool::new(false)),
-            ctrl_pressed: Arc::new(AtomicBool::new(false)),
-            caps_lock_on: Arc::new(AtomicBool::new(false)),
-            killswitch: Arc::new(AtomicBool::new(false)),
-        })
-    }
-}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Message {
@@ -47,13 +28,16 @@ pub enum Message {
     Quit,
 }
 
-pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<Message>) -> anyhow::Result<()> {
+pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<Message>) -> Result<()> {
+    view::create_overlay_window(Arc::clone(&app_state))?;
+
     while let Ok(msg) = receiver.recv() {
         match msg {
             Message::KeyEvent(vk_code, w_param, l_param) => {
                 if let Err(e) = handle_key_event(Arc::clone(&app_state), vk_code, w_param, l_param) {
                     eprintln!("Error handling key event: {}", e);
                 }
+               
             }
             Message::ConfigReload => {
                 if let Err(e) = reload_config(Arc::clone(&app_state)) {
@@ -62,7 +46,11 @@ pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<
             }
             Message::Quit => break,
         }
+
+        view::update_overlay(Arc::clone(&app_state))?;
     }
+
+    view::destroy_overlay_window(Arc::clone(&app_state))?;
     Ok(())
 }
 
@@ -86,7 +74,7 @@ unsafe extern "system" fn keyboard_hook_proc(
     CallNextHookEx(ptr::null_mut(), code, w_param, l_param)
 }
 
-pub fn listen_keyboard(sender: std::sync::mpsc::Sender<Message>) -> anyhow::Result<()> {
+pub fn listen_keyboard(sender: std::sync::mpsc::Sender<Message>) -> Result<()> {
     unsafe {
         GLOBAL_SENDER = Some(sender);
     }
@@ -139,7 +127,7 @@ fn handle_key_event(
     vk_code: DWORD,
     w_param: WPARAM,
     l_param: LPARAM,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let now = Instant::now();
 
     match w_param as u32 {
@@ -160,6 +148,9 @@ fn handle_key_event(
                 VK_CONTROL | VK_LCONTROL | VK_RCONTROL => {
                     app_state.ctrl_pressed.store(true, Ordering::SeqCst);
                 }
+                VK_MENU | VK_LMENU | VK_RMENU => {
+                    app_state.alt_pressed.store(true, Ordering::SeqCst);
+                }
                 VK_CAPITAL => {
                     let current = app_state.caps_lock_on.load(Ordering::SeqCst);
                     app_state.caps_lock_on.store(!current, Ordering::SeqCst);
@@ -169,11 +160,7 @@ fn handle_key_event(
                 }
                 _ => {
                     if app_state.ctrl_pressed.load(Ordering::SeqCst) {
-                        // Handle Ctrl+V (paste) operation
                         if vk_code as i32 == 'V' as i32 {
-                            // For simplicity, we're not actually pasting here.
-                            // In a real implementation, you'd want to get the clipboard content
-                            // and add it to current_text.
                             app_state.current_text.lock().unwrap().clear();
                         }
                     } else if let Some(c) = get_char_from_vk(
@@ -197,6 +184,9 @@ fn handle_key_event(
             }
             VK_CONTROL | VK_LCONTROL | VK_RCONTROL => {
                 app_state.ctrl_pressed.store(false, Ordering::SeqCst);
+            }
+            VK_MENU | VK_LMENU | VK_RMENU => {
+                app_state.alt_pressed.store(false, Ordering::SeqCst);
             }
             VK_ESCAPE => {
                 app_state.killswitch.store(false, Ordering::SeqCst);
@@ -246,7 +236,7 @@ fn get_char_from_vk(vk_code: i32, shift_pressed: bool, caps_lock_on: bool) -> Op
     }
 }
 
-fn check_and_replace(app_state: &AppState, current_text: &mut VecDeque<char>) -> anyhow::Result<()> {
+fn check_and_replace(app_state: &AppState, current_text: &mut VecDeque<char>) -> Result<()> {
     let immutable_current_text: String = current_text.iter().collect();
     let config = app_state.config.lock().unwrap();
     for rule in &config.rules {
@@ -299,7 +289,7 @@ fn perform_replacement(
     propagate_case: bool,
     dynamic: bool,
     app_state: &AppState,
-) -> anyhow::Result<()> {
+) -> Result<()> {
     let final_replacement = if dynamic {
         process_dynamic_replacement(replacement)
     } else if propagate_case {
@@ -312,22 +302,17 @@ fn perform_replacement(
         return Ok(());
     }
 
-    // Block the listener before simulating key presses
     GENERATING.store(true, Ordering::SeqCst);
 
-    // Backspace the original text
     let backspace_count = original.chars().count();
     let backspaces = vec![VK_BACK; backspace_count];
     simulate_key_presses(&backspaces, KEY_DELAY);
 
-    // Type the replacement
     let vk_codes = string_to_vk_codes(&final_replacement);
     simulate_key_presses(&vk_codes, KEY_DELAY);
 
-    // Unblock the listener after simulating key presses
     GENERATING.store(false, Ordering::SeqCst);
 
-    // Update current_text
     for _ in 0..original.len() {
         current_text.pop_back();
     }
@@ -341,7 +326,7 @@ fn perform_replacement(
     Ok(())
 }
 
-fn process_code_replacement(language: &str, code: &str) -> anyhow::Result<String> {
+fn process_code_replacement(language: &str, code: &str) -> Result<String> {
     match language.to_lowercase().as_str() {
         "python" => {
             let output = Command::new("python")
@@ -353,12 +338,10 @@ fn process_code_replacement(language: &str, code: &str) -> anyhow::Result<String
         "javascript" => {
             let output = Command::new("node")
                 .arg("-e")
-                .arg(code)
-                .output()?;
+                .arg(code).output()?;
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         }
         "rust" => {
-            // For Rust, we'll need to create a temporary file, compile it, and run it
             use std::fs::File;
             use std::io::Write;
             use tempfile::Builder;
@@ -411,7 +394,7 @@ fn process_dynamic_replacement(replacement: &str) -> String {
     }
 }
 
-fn reload_config(app_state: Arc<AppState>) -> Result<(), ParseError> {
+fn reload_config(app_state: Arc<AppState>) -> Result<()> {
     let mut config = app_state.config.lock().unwrap();
     *config = load_config()?;
     Ok(())
@@ -424,7 +407,6 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
     let mut inputs: Vec<winapi::um::winuser::INPUT> = Vec::with_capacity(input_count);
 
     for &vk in vk_codes {
-        // Key press event
         inputs.push(winapi::um::winuser::INPUT {
             type_: INPUT_KEYBOARD,
             u: unsafe { mem::zeroed() },
@@ -435,7 +417,6 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
             ki.dwFlags = 0;
         }
 
-        // Key release event
         inputs.push(winapi::um::winuser::INPUT {
             type_: INPUT_KEYBOARD,
             u: unsafe { mem::zeroed() },
@@ -447,7 +428,6 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
         }
     }
 
-    // Send inputs in batches
     for chunk in inputs.chunks(batch_size) {
         unsafe {
             SendInput(
@@ -456,7 +436,6 @@ fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
                 std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
             );
         }
-        // Add a small delay between batches for more natural input
         thread::sleep(delay);
     }
 }
@@ -471,51 +450,20 @@ fn char_to_vk_code(c: char) -> i32 {
     let high_byte = (vk_code >> 8) & 0xFF;
 
     if high_byte & 1 != 0 {
-        // Shift is required
         VK_SHIFT
     } else {
         low_byte
     }
 }
 
-// Error handling
-#[derive(Debug)]
-pub enum TextraError {
-    ConfigError(ParseError),
-    IoError(std::io::Error),
-    ExecutionError(String),
-}
 
-impl std::fmt::Display for TextraError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            TextraError::ConfigError(e) => write!(f, "Configuration error: {}", e),
-            TextraError::IoError(e) => write!(f, "I/O error: {}", e),
-            TextraError::ExecutionError(e) => write!(f, "Execution error: {}", e),
-        }
-    }
-}
 
-impl std::error::Error for TextraError {}
 
-impl From<ParseError> for TextraError {
-    fn from(error: ParseError) -> Self {
-        TextraError::ConfigError(error)
-    }
-}
-
-impl From<std::io::Error> for TextraError {
-    fn from(error: std::io::Error) -> Self {
-        TextraError::IoError(error)
-    }
-}
-
-// Main function to tie everything together
-pub fn run() -> anyhow::Result<()> {
+ 
+pub fn run_hook() -> Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let app_state = Arc::new(AppState::new()?);
 
-    // Start the config watcher in a separate thread
     let config_watcher_sender = sender.clone();
     let config_watcher_handle = std::thread::spawn(move || {
         if let Err(e) = watch_config(config_watcher_sender) {
@@ -523,54 +471,17 @@ pub fn run() -> anyhow::Result<()> {
         }
     });
 
-    // Start the keyboard listener in a separate thread
     let keyboard_listener_handle = std::thread::spawn(move || {
         if let Err(e) = listen_keyboard(sender) {
             eprintln!("Error in keyboard listener: {}", e);
         }
     });
 
-    // Run the main loop
     main_loop(app_state, &receiver)?;
 
-    // Clean up
     config_watcher_handle.join().unwrap();
     keyboard_listener_handle.join().unwrap();
 
     Ok(())
 }
-
-fn watch_config(sender: std::sync::mpsc::Sender<Message>) -> anyhow::Result<()> {
-    use notify::{Watcher, RecursiveMode};
-    use std::path::Path;
-
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    let mut watcher = notify::recommended_watcher(tx)?;
-
-    watcher.watch(Path::new("config.toml"), RecursiveMode::NonRecursive)?;
-
-    loop {
-        match rx.recv() {
-            Ok(_) => {
-                // Config file changed, send reload message
-                sender.send(Message::ConfigReload)?;
-            },
-            Err(e) => println!("watch error: {:?}", e),
-        }
-    }
-}
-
-impl std::fmt::Debug for AppState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AppState")
-            .field("config", &"[TextraConfig]")
-            .field("current_text", &"[VecDeque<char>]")
-            .field("last_key_time", &self.last_key_time)
-            .field("shift_pressed", &self.shift_pressed)
-            .field("ctrl_pressed", &self.ctrl_pressed)
-            .field("caps_lock_on", &self.caps_lock_on)
-            .field("killswitch", &self.killswitch)
-            .finish()
-    }
-}
+ 

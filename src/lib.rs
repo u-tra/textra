@@ -38,7 +38,12 @@ mod parser;
 pub mod config;
 pub mod keyboard;
 pub mod installer;
+pub mod view;
+pub mod state;
 
+
+use crate::state::*;
+use crate::view::*;
 use crate::parser::*;
 use crate::config::*;
 use crate::keyboard::*;

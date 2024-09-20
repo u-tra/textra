@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use pest::error::Error;
 use pest::iterators::Pair;
 
+use crate::Suggestion;
+
 #[derive(Parser)]
 #[grammar = "textra.pest"]
 struct TextraParser;
@@ -29,6 +31,72 @@ pub enum Replacement {
 }
 
 pub type ParseError = pest::error::Error<Rule>;
+
+impl TextraConfig {
+    pub fn get_suggestions(&self, current_text: &str) -> Vec<Suggestion> {
+        let mut suggestions = Vec::new();
+        for rule in &self.rules {
+            let score = self.score_replacement(&rule.replacement, current_text);
+            suggestions.push(Suggestion {
+                text: rule.triggers.join(" | "),
+                score: score as u32,
+            });
+        }
+        suggestions
+    }
+
+    pub fn score_replacement(&self, replacement: &Replacement, current_text: &str) -> f32 {
+        match replacement {
+            Replacement::Simple(s) => self.score_simple(s, current_text),
+            Replacement::Multiline(s) => self.score_multiline(s, current_text),
+            Replacement::Code { language, content } => self.score_code(language, content, current_text),
+        }
+    }
+
+    pub fn score_simple(&self, s: &str, current_text: &str) -> f32 {
+        let mut score = 0;
+        let mut last_index = 0;
+        for (i, c) in current_text.chars().enumerate() {
+            if c == s.chars().next().unwrap() {
+                score += 1;
+                last_index = i;
+            }
+        }
+        score as f32 / (current_text.len() - last_index) as f32
+    }
+
+    pub fn score_multiline(&self, s: &str, current_text: &str) -> f32 {
+        let mut score = 0;
+        let mut last_index = 0;
+        for (i, c) in current_text.chars().enumerate() {
+            if c == s.chars().next().unwrap() {
+                score += 1;
+                last_index = i;
+            }
+        }
+        score as f32 / (current_text.len() - last_index) as f32
+    }
+
+    pub fn score_code(&self, language: &str, content: &str, current_text: &str) -> f32 {
+        let mut score = 0;
+        let mut last_index = 0;
+        for (i, c) in current_text.chars().enumerate() {
+            if c == content.chars().next().unwrap() {
+                score += 1;
+                last_index = i;
+            }
+        }
+        score as f32 / (current_text.len() - last_index) as f32
+    }
+
+
+    
+    
+    
+ 
+}
+
+    
 
 pub fn parse_textra_config(input: &str) -> Result<TextraConfig, Error<Rule>> {
     let mut config = TextraConfig {
