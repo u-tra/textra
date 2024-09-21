@@ -38,11 +38,17 @@ const UNINSTALLER_CODE: &str = r#"
 "#;
 
 pub fn auto_install() -> Result<()> {
-    if is_installed() {
-        return Ok(());
+    if !is_installed() {
+     
+        handle_install().context("Failed to install textra")?;
     }
-    handle_install()
+
+    if !is_service_running() {
+        handle_run().context("Failed to start daemon")?;
+    };
+    Ok(())
 }
+
 
 pub fn is_installed() -> bool {
     let install_dir = get_install_dir().unwrap();
@@ -70,7 +76,7 @@ pub fn handle_install() -> Result<()> {
     add_to_path(&install_dir).context("Failed to add Textra to PATH")?;
     set_autostart(&install_path).context("Failed to set autostart")?;
     create_uninstaller(&install_dir).context("Failed to create uninstaller")?;
-
+    handle_run().context("Failed to start service")?;
  
     Ok(())
 }

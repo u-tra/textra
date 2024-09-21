@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use pest::error::Error;
 use pest::iterators::Pair;
 
-use crate::Suggestion;
+// use crate::Suggestion;
 
 #[derive(Parser)]
 #[grammar = "textra.pest"]
@@ -33,17 +33,17 @@ pub enum Replacement {
 pub type ParseError = pest::error::Error<Rule>;
 
 impl TextraConfig {
-    pub fn get_suggestions(&self, current_text: &str) -> Vec<Suggestion> {
-        let mut suggestions = Vec::new();
-        for rule in &self.rules {
-            let score = self.score_replacement(&rule.replacement, current_text);
-            suggestions.push(Suggestion {
-                text: rule.triggers.join(" | "),
-                score: score as u32,
-            });
-        }
-        suggestions
-    }
+    // pub fn get_suggestions(&self, current_text: &str) -> Vec<Suggestion> {
+    //     let mut suggestions = Vec::new();
+    //     for rule in &self.rules {
+    //         let score = self.score_replacement(&rule.replacement, current_text);
+    //         suggestions.push(Suggestion {
+    //             text: rule.triggers.join(" | "),
+    //             score: score as u32,
+    //         });
+    //     }
+    //     suggestions
+    // }
 
     pub fn score_replacement(&self, replacement: &Replacement, current_text: &str) -> f32 {
         match replacement {

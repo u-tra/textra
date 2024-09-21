@@ -14,7 +14,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use std::{mem, ptr};
-use view::Suggestion;
+// use view::Suggestion;
 use winapi::ctypes::c_int;
 use winapi::shared::minwindef::*;
 use winapi::shared::windef::*;
@@ -88,12 +88,12 @@ impl AppState {
         self.caps_lock_on.load(Ordering::SeqCst)
     }
 
-    pub fn get_suggestions(&self) -> Vec<Suggestion> {
-        let config = self.config.lock().unwrap();
-        let current_text: String = self.current_text.lock().unwrap().iter().collect();
-        let suggestions = config.get_suggestions(&current_text);
-        suggestions
-    }
+    // pub fn get_suggestions(&self) -> Vec<Suggestion> {
+    //     let config = self.config.lock().unwrap();
+    //     let current_text: String = self.current_text.lock().unwrap().iter().collect();
+    //     let suggestions = config.get_suggestions(&current_text);
+    //     suggestions
+    // }
 
     pub fn get_killswitch(&self) -> bool {
         self.killswitch.load(Ordering::SeqCst)

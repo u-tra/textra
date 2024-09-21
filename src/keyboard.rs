@@ -29,7 +29,7 @@ pub enum Message {
 }
 
 pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<Message>) -> Result<()> {
-    view::create_overlay_window(Arc::clone(&app_state))?;
+    // view::create_overlay_window(Arc::clone(&app_state))?;
 
     while let Ok(msg) = receiver.recv() {
         match msg {
@@ -47,10 +47,10 @@ pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<
             Message::Quit => break,
         }
 
-        view::update_overlay(Arc::clone(&app_state))?;
+        // view::update_overlay(Arc::clone(&app_state))?;
     }
 
-    view::destroy_overlay_window(Arc::clone(&app_state))?;
+    // view::destroy_overlay_window(Arc::clone(&app_state))?;
     Ok(())
 }
 

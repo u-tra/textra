@@ -19,11 +19,17 @@ use anyhow::Result;
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
+//if applicaton is launched by double clicking the icon
+//we want window to stay open (usually it closes immediately)
 
     if args.len() == 1 {
          display_help();
+         //wait for user to press enter
+         let mut input = String::new();
+         std::io::stdin().read_line(&mut input).unwrap();
          return Ok(());
     }
+
 
     match args[1].as_str() {
         "run" | "start" => handle_run(),
@@ -49,6 +55,8 @@ fn main() -> Result<()> {
             }
         }
     }
+
+     
 }
 
 
