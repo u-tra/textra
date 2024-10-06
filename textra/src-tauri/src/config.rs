@@ -124,7 +124,7 @@ pub fn create_default_config(path: &Path) -> Result<(), io::Error> {
     Ok(())
 }
 
-pub fn watch_config(sender: std::sync::mpsc::Sender<Message>) -> Result<(), io::Error> {
+pub fn watch_config(sender: std::sync::mpsc::Sender<AppMessage>) -> Result<(), io::Error> {
     let config_path = get_config_path()?;
     let config_dir = config_path.parent().unwrap();
 
@@ -173,7 +173,7 @@ pub fn watch_config(sender: std::sync::mpsc::Sender<Message>) -> Result<(), io::
                 return Err(io::Error::last_os_error().into());
             }
 
-            sender.send(Message::ConfigReload).unwrap();
+            sender.send(AppMessage::ConfigChanged).unwrap();
         }
     }
 }

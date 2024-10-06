@@ -1,14 +1,16 @@
 use super::*;
 use anyhow::Result;
 use chrono::Local;
+use mouse::ClickType;
 use notify::{RecursiveMode, Watcher};
+use tauri::AppHandle;
 use std::collections::{HashMap, VecDeque};
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicI32, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -33,10 +35,15 @@ pub struct AppState {
     pub caps_lock_on: Arc<AtomicBool>,
     pub killswitch: Arc<AtomicBool>,
     pub overlay_hwnd: Arc<Mutex<HWND>>,
+    pub last_click_time: Arc<Mutex<Instant>>,
+    pub last_click_x: AtomicI32,
+    pub last_click_y: AtomicI32,
+    pub click_count: AtomicI32,
+  
 }
 
 impl AppState {
-    pub fn new() -> Result<Self> {
+    pub fn new( ) -> Result<Self> {
         let config = load_config()?;
 
         Ok(Self {
@@ -49,6 +56,11 @@ impl AppState {
             caps_lock_on: Arc::new(AtomicBool::new(false)),
             killswitch: Arc::new(AtomicBool::new(false)),
             overlay_hwnd: Arc::new(Mutex::new(ptr::null_mut())),
+            last_click_time: Arc::new(Mutex::new(Instant::now())),
+            last_click_x: AtomicI32::new(0),
+            last_click_y: AtomicI32::new(0),
+            click_count: AtomicI32::new(0),
+      
         })
     }
 
@@ -97,5 +109,33 @@ impl AppState {
 
     pub fn get_killswitch(&self) -> bool {
         self.killswitch.load(Ordering::SeqCst)
+    }
+
+    pub fn update_mouse_click(&self, x: i32, y: i32) {
+        let mut last_click_time = self.last_click_time.lock().unwrap();
+        let now = Instant::now();
+        let time_since_last_click = now.duration_since(*last_click_time);
+        let last_x = self.last_click_x.load(Ordering::Relaxed);
+        let last_y = self.last_click_y.load(Ordering::Relaxed);
+
+        if time_since_last_click <= Duration::from_millis(500) 
+           && (x - last_x).abs() <= 4 
+           && (y - last_y).abs() <= 4 {
+            self.click_count.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.click_count.store(1, Ordering::Relaxed);
+        }
+
+        *last_click_time = now;
+        self.last_click_x.store(x, Ordering::Relaxed);
+        self.last_click_y.store(y, Ordering::Relaxed);
+    }
+
+    pub fn get_click_type(&self) -> ClickType {
+        match self.click_count.load(Ordering::Relaxed) {
+            1 => ClickType::Single,
+            2 => ClickType::Double,
+            _ => ClickType::Single,
+        }
     }
 }

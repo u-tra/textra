@@ -1,0 +1,24 @@
+{
+  "identifier": "desktop-capability",
+  "platforms": [
+    "macOS",
+    "windows",
+    "linux"
+  ],
+  "permissions": [
+    "autostart:default",
+    "autostart:allow-enable",
+    "autostart:allow-disable",
+    "autostart:allow-is-enabled",
+    "clipboard-manager:allow-clear",
+    "clipboard-manager:allow-read-image",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-html",
+    "clipboard-manager:allow-write-image",
+    "clipboard-manager:allow-write-text",
+    "global-shortcut:allow-is-registered",
+    "global-shortcut:allow-register",
+    "global-shortcut:allow-unregister",
+    "window-state:default"
+  ]
+}
