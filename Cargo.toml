@@ -1,6 +1,6 @@
 [package]
 name = "textra"
-version = "0.1.65"
+version = "0.1.66"
 edition = "2021"
 authors = ["incredimo <a@xo.rs>"]
 description = "type less, write more"
@@ -56,3 +56,4 @@ winapi = { version = "0.3.9", features = [
     "consoleapi",
 ] }
 winreg = "0.52.0"
+
