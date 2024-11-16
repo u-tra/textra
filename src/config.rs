@@ -188,22 +188,17 @@ const DEFAULT_CONFIG: &str = r#"
 /// It's as simple as that!
 
 btw => by the way
-:date => ```javascript
-    return format.date(date.now(), "YYYY-MM-DD");
-```
-:time => ```javascript
-    return format.date(date.now(), "HH:mm:ss");
-```
+
 :email => example@example.com
+
 :psswd => 0nceUpon@TimeInPluto
+
 pfa => please find the attached information as requested
+
 pftb => please find the below information as required
-:tst => `twinkle twinkle little star, how i wonder what you are,
-up above the world so high,
-like a diamond in the sky`
+
+:tst => `twinkle twinkle little star, how i wonder what you are,up above the world so high,like a diamond in the sky`
+
 ccc => continue writing complete code without skipping anything
-:ping => ```javascript
-    let pr = await network.ping("www.google.com");
-    return "I pinged Google and it responded " + pr;
-```
+
 "#;
