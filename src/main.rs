@@ -24,9 +24,8 @@ fn main() -> Result<()> {
 
     if args.len() == 1 {
          display_help();
-         //wait for user to press enter
-         let mut input = String::new();
-         std::io::stdin().read_line(&mut input).unwrap();
+         //wait for 2 seconds before closing
+         std::thread::sleep(std::time::Duration::from_secs(2));
          return Ok(());
     }
 

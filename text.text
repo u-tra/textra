@@ -11,9 +11,9 @@
 
 
 
-btw => by the way
-pfa => please find the attached information as requested
-pftb => please find the below information as required
+btw => By the way
+pfa => Please find the attached information as requested
+pftb => Please find the below information as required
 ccc => continue writing complete code without skipping even a single line.
 wcc => write complete code without skipping even a single line.
 fff => fix all the errors in the code
@@ -26,19 +26,3 @@ fff => fix all the errors in the code
 up above the world so high,
 like a diamond in the sky`
 
-/// textra also supports code execution using
-/// a special syntax. you can write code that will be executed
-/// and the result will be inserted in the document.
-/// for example, if i want to write the current date and time
-/// i can write the following
-:date => ```javascript
-    return format.date(date.now(), "YYYY-MM-DD");
-```
-
-/// similarly, for time
-:time => ```javascript
-    return format.date(date.now(), "HH:mm:ss");
-```
-:ip => ```powershell
-Invoke-WebRequest -Uri "https://api.ipify.org/?format=json" | ConvertFrom-Json | Select -ExpandProperty ip
-```

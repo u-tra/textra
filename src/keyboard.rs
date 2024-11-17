@@ -1,10 +1,15 @@
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant};
 use std::collections::{HashMap, VecDeque};
 use std::thread;
 use chrono::Local;
-use winapi::um::{libloaderapi::GetModuleHandleW, winuser::*};
-use winapi::um::wingdi::*;
+use winapi::um::{
+    libloaderapi::GetModuleHandleW, winuser::*,
+    wingdi::*,
+};
 use winapi::shared::minwindef::*;
 use winapi::shared::windef::*;
 use winapi::ctypes::c_int;
@@ -15,9 +20,10 @@ use std::os::windows::ffi::OsStrExt;
 use notify::{Watcher, RecursiveMode};
 use std::path::Path;
 use anyhow::Result;
+use lazy_static::lazy_static;
+use tempfile::Builder;
 
 use crate::{load_config, view, watch_config, AppState, Replacement, TextraConfig, MAX_TEXT_LENGTH};
-
 
 const KEY_DELAY: u64 = 10;
 
@@ -37,7 +43,6 @@ pub fn main_loop(app_state: Arc<AppState>, receiver: &std::sync::mpsc::Receiver<
                 if let Err(e) = handle_key_event(Arc::clone(&app_state), vk_code, w_param, l_param) {
                     eprintln!("Error handling key event: {}", e);
                 }
-               
             }
             Message::ConfigReload => {
                 if let Err(e) = reload_config(Arc::clone(&app_state)) {
@@ -94,7 +99,7 @@ pub fn listen_keyboard(sender: std::sync::mpsc::Sender<Message>) -> Result<()> {
     Ok(())
 }
 
-lazy_static::lazy_static! {
+lazy_static! {
     static ref SYMBOL_PAIRS: HashMap<char, char> = {
         let mut m = HashMap::new();
         m.insert(';', ':');
@@ -120,6 +125,12 @@ lazy_static::lazy_static! {
         m.insert('=', '+');
         m
     };
+}
+
+#[derive(Debug, Clone)]
+struct KeyPress {
+    modifiers: Vec<i32>, // e.g., VK_SHIFT, VK_CONTROL, VK_MENU
+    key: i32,             // main key
 }
 
 fn handle_key_event(
@@ -305,11 +316,11 @@ fn perform_replacement(
     GENERATING.store(true, Ordering::SeqCst);
 
     let backspace_count = original.chars().count();
-    let backspaces = vec![VK_BACK; backspace_count];
-    simulate_key_presses(&backspaces, KEY_DELAY);
+    let backspaces : &[KeyPress] = &vec![KeyPress { modifiers: vec![], key: VK_BACK as i32 }; backspace_count];
+    simulate_key_presses(&backspaces, KEY_DELAY)?;
 
     let vk_codes = string_to_vk_codes(&final_replacement);
-    simulate_key_presses(&vk_codes, KEY_DELAY);
+    simulate_key_presses(&vk_codes, KEY_DELAY)?;
 
     GENERATING.store(false, Ordering::SeqCst);
 
@@ -344,7 +355,6 @@ fn process_code_replacement(language: &str, code: &str) -> Result<String> {
         "rust" => {
             use std::fs::File;
             use std::io::Write;
-            use tempfile::Builder;
 
             let dir = Builder::new().prefix("rust_exec").tempdir()?;
             let file_path = dir.path().join("main.rs");
@@ -400,66 +410,125 @@ fn reload_config(app_state: Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-fn simulate_key_presses(vk_codes: &[i32], key_delay: u64) {
-    let batch_size = 20;
+fn simulate_key_presses(vk_codes: &[KeyPress], key_delay: u64) -> Result<()> {
     let delay = Duration::from_millis(key_delay);
-    let input_count = vk_codes.len() * 2;
-    let mut inputs: Vec<winapi::um::winuser::INPUT> = Vec::with_capacity(input_count);
 
-    for &vk in vk_codes {
-        inputs.push(winapi::um::winuser::INPUT {
+    for key_press in vk_codes {
+        // Press all modifiers
+        for &modifier in &key_press.modifiers {
+            let mut input_down = winapi::um::winuser::INPUT {
+                type_: INPUT_KEYBOARD,
+                u: unsafe { mem::zeroed() },
+            };
+            unsafe {
+                let ki = input_down.u.ki_mut();
+                ki.wVk = modifier as u16;
+                ki.dwFlags = 0;
+            }
+            unsafe {
+                SendInput(
+                    1,
+                    &input_down as *const _ as *mut _,
+                    std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
+                );
+            }
+            thread::sleep(delay);
+        }
+
+        // Press the main key
+        let mut input_down = winapi::um::winuser::INPUT {
             type_: INPUT_KEYBOARD,
             u: unsafe { mem::zeroed() },
-        });
+        };
         unsafe {
-            let ki = inputs.last_mut().unwrap().u.ki_mut();
-            ki.wVk = vk as u16;
+            let ki = input_down.u.ki_mut();
+            ki.wVk = key_press.key as u16;
             ki.dwFlags = 0;
         }
-
-        inputs.push(winapi::um::winuser::INPUT {
-            type_: INPUT_KEYBOARD,
-            u: unsafe { mem::zeroed() },
-        });
-        unsafe {
-            let ki = inputs.last_mut().unwrap().u.ki_mut();
-            ki.wVk = vk as u16;
-            ki.dwFlags = KEYEVENTF_KEYUP;
-        }
-    }
-
-    for chunk in inputs.chunks(batch_size) {
         unsafe {
             SendInput(
-                chunk.len() as u32,
-                chunk.as_ptr() as *mut winapi::um::winuser::INPUT,
+                1,
+                &input_down as *const _ as *mut _,
                 std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
             );
         }
         thread::sleep(delay);
+
+        // Release the main key
+        let mut input_up = winapi::um::winuser::INPUT {
+            type_: INPUT_KEYBOARD,
+            u: unsafe { mem::zeroed() },
+        };
+        unsafe {
+            let ki = input_up.u.ki_mut();
+            ki.wVk = key_press.key as u16;
+            ki.dwFlags = KEYEVENTF_KEYUP;
+        }
+        unsafe {
+            SendInput(
+                1,
+                &input_up as *const _ as *mut _,
+                std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
+            );
+        }
+        thread::sleep(delay);
+
+        // Release all modifiers in reverse order
+        for &modifier in key_press.modifiers.iter().rev() {
+            let mut input_up = winapi::um::winuser::INPUT {
+                type_: INPUT_KEYBOARD,
+                u: unsafe { mem::zeroed() },
+            };
+            unsafe {
+                let ki = input_up.u.ki_mut();
+                ki.wVk = modifier as u16;
+                ki.dwFlags = KEYEVENTF_KEYUP;
+            }
+            unsafe {
+                SendInput(
+                    1,
+                    &input_up as *const _ as *mut _,
+                    std::mem::size_of::<winapi::um::winuser::INPUT>() as c_int,
+                );
+            }
+            thread::sleep(delay);
+        }
     }
+
+    Ok(())
 }
 
-fn string_to_vk_codes(s: &str) -> Vec<i32> {
-    s.chars().map(|c| char_to_vk_code(c)).collect()
+fn string_to_vk_codes(s: &str) -> Vec<KeyPress> {
+    s.chars().filter_map(|c| char_to_vk_code(c)).collect()
 }
 
-fn char_to_vk_code(c: char) -> i32 {
-    let vk_code = unsafe { VkKeyScanW(c as u16) as i32 };
-    let low_byte = vk_code & 0xFF;
-    let high_byte = (vk_code >> 8) & 0xFF;
-
-    if high_byte & 1 != 0 {
-        VK_SHIFT
-    } else {
-        low_byte
+fn char_to_vk_code(c: char) -> Option<KeyPress> {
+    let vk_scan = unsafe { VkKeyScanW(c as u16) };
+    if vk_scan == -1 {
+        return None;
     }
+
+    let vk_code = (vk_scan & 0xFF) as i32;
+    let shift_state = (vk_scan >> 8) & 0xFF;
+
+    let mut modifiers = Vec::new();
+
+    if shift_state & 1 != 0 {
+        modifiers.push(VK_SHIFT as i32);
+    }
+    if shift_state & 2 != 0 {
+        modifiers.push(VK_CONTROL as i32);
+    }
+    if shift_state & 4 != 0 {
+        modifiers.push(VK_MENU as i32);
+    }
+
+    Some(KeyPress {
+        modifiers,
+        key: vk_code,
+    })
 }
 
-
-
-
- 
 pub fn run_hook() -> Result<()> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let app_state = Arc::new(AppState::new()?);
@@ -484,4 +553,3 @@ pub fn run_hook() -> Result<()> {
 
     Ok(())
 }
- 
