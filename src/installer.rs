@@ -311,52 +311,76 @@ use std::process::Command;
 use std::time::Duration;
  
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct GitHubRelease {
     tag_name: String,
     assets: Vec<GitHubAsset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    year: u32,
-    month: u32,
-    day: u32,
-    build: u32,
+    parts: Vec<u32>,
 }
 
 impl Version {
     fn parse(version_str: &str) -> Result<Self> {
-        let parts: Vec<&str> = version_str.trim_start_matches('v').split('.').collect();
-        if parts.len() != 4 {
-            return Err(anyhow::anyhow!("Invalid version format: {}", version_str));
-        }
+        // Remove 'v' prefix if present
+        let version_str = version_str.trim_start_matches('v');
+        
+        // Split and parse all parts as numbers
+        let parts: Result<Vec<u32>, _> = version_str
+            .split('.')
+            .map(|s| s.parse::<u32>())
+            .collect();
 
-        Ok(Version {
-            year: parts[0].parse().context("Invalid year")?,
-            month: parts[1].parse().context("Invalid month")?,
-            day: parts[2].parse().context("Invalid day")?,
-            build: parts[3].parse().context("Invalid build number")?,
-        })
+        let parts = parts.context(format!("Invalid version format: {}", version_str))?;
+        Ok(Version { parts })
     }
 
     fn to_string(&self) -> String {
-        format!("{}.{:02}.{:02}.{:06}", self.year, self.month, self.day, self.build)
+        self.parts.iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(".")
     }
 }
+
+impl PartialOrd for Version {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Version {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Compare each part, padding shorter version with 0s
+        let max_len = self.parts.len().max(other.parts.len());
+        for i in 0..max_len {
+            let self_part = self.parts.get(i).copied().unwrap_or(0);
+            let other_part = other.parts.get(i).copied().unwrap_or(0);
+            
+            match self_part.cmp(&other_part) {
+                std::cmp::Ordering::Equal => continue,
+                other => return other,
+            }
+        }
+        std::cmp::Ordering::Equal
+    }
+}
+
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACHED_PROCESS: u32 = 0x00000008;
 pub fn handle_update() -> Result<()> {
     let latest_release = get_latest_release()?;
     let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
-    
+    println!("assets: {:?}", latest_release.assets);
     let textra_asset = latest_release.assets
         .iter()
         .find(|asset| asset.name == "textra.exe")
@@ -407,11 +431,15 @@ del "%~f0"
 
     // Launch the update script and exit
     showln!(gray_dim, "starting update process...");
-    Command::new("cmd")
-        .args(&["/C", "start", "/min", "", update_script_path.to_str().unwrap()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .context("Failed to start update process")?;
+   // Launch update script with explicit path and working directory
+   let status = Command::new("cmd")
+   .args(&["/C", update_script_path.to_str().unwrap()])
+   .current_dir(&install_dir)
+   .creation_flags(CREATE_NO_WINDOW)
+   .spawn()
+   .context("Failed to start update process")?;
+
+ 
 
     showln!(gray_dim, "update prepared, restarting textra...");
     std::process::exit(0);
