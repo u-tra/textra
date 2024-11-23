@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use io::Write;
 use minimo::showln;
+use serde::Deserialize;
 use std::env;
 use std::fs;
 use std::fs::File;
@@ -306,9 +307,9 @@ fn update_environment_message() {
 }
 
  
-use serde::Deserialize;
- 
+use std::process::Command;
 use std::time::Duration;
+ 
 
 #[derive(Deserialize)]
 struct GitHubRelease {
@@ -350,101 +351,70 @@ impl Version {
     }
 }
 
-pub fn check_for_updates() -> Result<bool> {
-    showln!(gray_dim, "checking for updates...");
-    
-    let current_version = get_current_version()?;
-    showln!(gray_dim, "current version: ", yellow_bold, &current_version.to_string());
-    
-    match get_latest_release() {
-        Ok(latest_release) => {
-            let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
-            showln!(gray_dim, "latest version: ", yellow_bold, &latest_version.to_string());
-            
-            Ok(latest_version > current_version)
-        }
-        Err(e) => {
-            showln!(orange_bold, "failed to check for updates: {}", e);
-            Ok(false)
-        }
-    }
-}
-
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+const DETACHED_PROCESS: u32 = 0x00000008;
 pub fn handle_update() -> Result<()> {
-    showln!(gray_dim, "starting update process...");
-
     let latest_release = get_latest_release()?;
     let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
     
-    // Find textra.exe asset
     let textra_asset = latest_release.assets
         .iter()
         .find(|asset| asset.name == "textra.exe")
         .context("Could not find textra.exe in release assets")?;
 
-    showln!(gray_dim, "downloading version ", yellow_bold, latest_version.to_string());
+    // Get paths
+    let install_dir = get_install_dir()?;
+    let current_exe = env::current_exe()?;
+    let new_exe_path = install_dir.join("textra.new.exe");
+    let update_script_path = install_dir.join("update.bat");
 
-    // Download new version to temporary location
-    let temp_path = get_install_dir()?.join("textra.exe.new");
-    match download_file(&textra_asset.browser_download_url, &temp_path) {
-        Ok(_) => {
-            // Stop running instance
-            if is_service_running() {
-                showln!(orange_bold, "stopping current instance for update...");
-                handle_stop()?;
-            }
+    // Download new version first
+    showln!(gray_dim, "downloading version ", yellow_bold, &latest_version.to_string());
+    download_file(&textra_asset.browser_download_url, &new_exe_path)?;
 
-            // Create backup of current version
-            let install_path = get_install_dir()?.join("textra.exe");
-            let backup_path = get_install_dir()?.join("textra.exe.backup");
-            if install_path.exists() {
-                fs::rename(&install_path, &backup_path)
-                    .context("Failed to create backup of current version")?;
-            }
+    // Create update batch script
+    let batch_script = format!(
+        r#"@echo off
+setlocal enabledelayedexpansion
 
-            // Replace with new version
-            fs::rename(&temp_path, &install_path)
-                .context("Failed to replace executable")?;
+rem Wait a bit for parent process to exit
+timeout /t 1 /nobreak >nul
 
-            // Cleanup backup if update successful
-            if backup_path.exists() {
-                let _ = fs::remove_file(backup_path);
-            }
+rem Kill any running instances of textra
+taskkill /F /IM textra.exe /T >nul 2>&1
+timeout /t 1 /nobreak >nul
 
-            // Restart service
-            handle_run()?;
+:RETRY_COPY
+rem Try to copy new version over old version
+copy /Y "{new}" "{current}" >nul 2>&1
+if !errorlevel! neq 0 (
+    timeout /t 1 /nobreak >nul
+    goto RETRY_COPY
+)
 
-            showln!(green_bold, "successfully updated to version ", yellow_bold, latest_version.to_string());
-            Ok(())
-        }
-        Err(e) => {
-            showln!(red_bold, "update failed: {}", e);
-            // Cleanup temporary file if it exists
-            if temp_path.exists() {
-                let _ = fs::remove_file(temp_path);
-            }
-            Err(e)
-        }
-    }
-}
+rem Start new version
+start "" "{current}" run
 
-fn get_latest_release() -> Result<GitHubRelease> {
-    let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
+rem Clean up
+del "{new}" >nul 2>&1
+del "%~f0"
+"#,
+        new = new_exe_path.display(),
+        current = current_exe.display()
+    );
 
-    let response = client
-        .get("https://api.github.com/repos/u-tra/textra/releases/latest")
-        .header("User-Agent", "Textra-Updater")
-        .send()
-        .context("Failed to contact GitHub API")?;
+    fs::write(&update_script_path, batch_script)?;
 
-    if response.status().is_success() {
-        response.json::<GitHubRelease>()
-            .context("Failed to parse GitHub response")
-    } else {
-        Err(anyhow::anyhow!("GitHub API returned status: {}", response.status()))
-    }
+    // Launch the update script and exit
+    showln!(gray_dim, "starting update process...");
+    Command::new("cmd")
+        .args(&["/C", "start", "/min", "", update_script_path.to_str().unwrap()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("Failed to start update process")?;
+
+    showln!(gray_dim, "update prepared, restarting textra...");
+    std::process::exit(0);
 }
 
 fn download_file(url: &str, path: &PathBuf) -> Result<()> {
@@ -468,6 +438,27 @@ fn download_file(url: &str, path: &PathBuf) -> Result<()> {
     }
 }
 
+fn get_latest_release() -> Result<GitHubRelease> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let response = client
+        .get("https://api.github.com/repos/u-tra/textra/releases/latest")
+        .header("User-Agent", "Textra-Updater")
+        .send()
+        .context("Failed to contact GitHub API")?;
+
+    if response.status().is_success() {
+        response.json::<GitHubRelease>()
+            .context("Failed to parse GitHub response")
+    } else {
+        Err(anyhow::anyhow!("GitHub API returned status: {}", response.status()))
+    }
+}
+
+ 
+
 fn get_current_version() -> Result<Version> {
     let version_str = env!("CARGO_PKG_VERSION");
     Version::parse(version_str)
@@ -485,14 +476,8 @@ pub fn update_if_available() -> Result<()> {
 
     match check_for_updates() {
         Ok(true) => {
-            showln!(gray_dim, "new version available, starting update...");
-            match handle_update() {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    showln!(red_bold, "update failed: {}", e);
-                    Err(e)
-                }
-            }
+            showln!(gray_dim, "new version available, preparing update...");
+            handle_update()
         }
         Ok(false) => {
             showln!(gray_dim, "textra is up to date!");
@@ -501,6 +486,24 @@ pub fn update_if_available() -> Result<()> {
         Err(e) => {
             showln!(orange_bold, "failed to check for updates: {}", e);
             Err(e)
+        }
+    }
+}
+
+pub fn check_for_updates() -> Result<bool> {
+    let current_version = get_current_version()?;
+    showln!(gray_dim, "current version: ", yellow_bold, &current_version.to_string());
+    
+    match get_latest_release() {
+        Ok(latest_release) => {
+            let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
+            showln!(gray_dim, "latest version: ", yellow_bold, &latest_version.to_string());
+            
+            Ok(latest_version > current_version)
+        }
+        Err(e) => {
+            showln!(orange_bold, "failed to check for updates: {}", e);
+            Ok(false)
         }
     }
 }

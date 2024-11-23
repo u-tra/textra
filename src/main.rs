@@ -15,7 +15,7 @@ use textra::*;
 use textra::config::*;
 use textra::keyboard::*;
 use anyhow::Result;
-
+ 
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         "stop" | "kill" => handle_stop(),
         "install" | "setup" => handle_install(),
         "uninstall" | "remove" => handle_uninstall(),
-        "update" => handle_update(),
+        "update" => update_if_available(),
         _ => {
             match auto_install() {
                 Ok(_) => {
