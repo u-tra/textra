@@ -305,7 +305,6 @@ fn update_environment_message() {
     }
 }
 
-
  
 use serde::Deserialize;
  
@@ -323,21 +322,59 @@ struct GitHubAsset {
     browser_download_url: String,
 }
 
-pub   fn check_for_updates() -> Result<bool> {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version {
+    year: u32,
+    month: u32,
+    day: u32,
+    build: u32,
+}
+
+impl Version {
+    fn parse(version_str: &str) -> Result<Self> {
+        let parts: Vec<&str> = version_str.trim_start_matches('v').split('.').collect();
+        if parts.len() != 4 {
+            return Err(anyhow::anyhow!("Invalid version format: {}", version_str));
+        }
+
+        Ok(Version {
+            year: parts[0].parse().context("Invalid year")?,
+            month: parts[1].parse().context("Invalid month")?,
+            day: parts[2].parse().context("Invalid day")?,
+            build: parts[3].parse().context("Invalid build number")?,
+        })
+    }
+
+    fn to_string(&self) -> String {
+        format!("{}.{:02}.{:02}.{:06}", self.year, self.month, self.day, self.build)
+    }
+}
+
+pub fn check_for_updates() -> Result<bool> {
     showln!(gray_dim, "checking for updates...");
     
     let current_version = get_current_version()?;
-    let latest_release = get_latest_release()?;
+    showln!(gray_dim, "current version: ", yellow_bold, &current_version.to_string());
     
-    let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
-    
-    Ok(latest_version > current_version)
+    match get_latest_release() {
+        Ok(latest_release) => {
+            let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
+            showln!(gray_dim, "latest version: ", yellow_bold, &latest_version.to_string());
+            
+            Ok(latest_version > current_version)
+        }
+        Err(e) => {
+            showln!(orange_bold, "failed to check for updates: {}", e);
+            Ok(false)
+        }
+    }
 }
 
 pub fn handle_update() -> Result<()> {
     showln!(gray_dim, "starting update process...");
 
     let latest_release = get_latest_release()?;
+    let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
     
     // Find textra.exe asset
     let textra_asset = latest_release.assets
@@ -345,26 +382,50 @@ pub fn handle_update() -> Result<()> {
         .find(|asset| asset.name == "textra.exe")
         .context("Could not find textra.exe in release assets")?;
 
+    showln!(gray_dim, "downloading version ", yellow_bold, latest_version.to_string());
+
     // Download new version to temporary location
     let temp_path = get_install_dir()?.join("textra.exe.new");
-    download_file(&textra_asset.browser_download_url, &temp_path)?;
+    match download_file(&textra_asset.browser_download_url, &temp_path) {
+        Ok(_) => {
+            // Stop running instance
+            if is_service_running() {
+                showln!(orange_bold, "stopping current instance for update...");
+                handle_stop()?;
+            }
 
-    // Stop running instance
-    if is_service_running() {
-        showln!(orange_bold, "stopping current instance for update...");
-        handle_stop()?;
+            // Create backup of current version
+            let install_path = get_install_dir()?.join("textra.exe");
+            let backup_path = get_install_dir()?.join("textra.exe.backup");
+            if install_path.exists() {
+                fs::rename(&install_path, &backup_path)
+                    .context("Failed to create backup of current version")?;
+            }
+
+            // Replace with new version
+            fs::rename(&temp_path, &install_path)
+                .context("Failed to replace executable")?;
+
+            // Cleanup backup if update successful
+            if backup_path.exists() {
+                let _ = fs::remove_file(backup_path);
+            }
+
+            // Restart service
+            handle_run()?;
+
+            showln!(green_bold, "successfully updated to version ", yellow_bold, latest_version.to_string());
+            Ok(())
+        }
+        Err(e) => {
+            showln!(red_bold, "update failed: {}", e);
+            // Cleanup temporary file if it exists
+            if temp_path.exists() {
+                let _ = fs::remove_file(temp_path);
+            }
+            Err(e)
+        }
     }
-
-    // Replace old executable
-    let install_path = get_install_dir()?.join("textra.exe");
-    fs::rename(&temp_path, &install_path)
-        .context("Failed to replace old executable")?;
-
-    // Restart service
-    handle_run()?;
-
-    showln!(green_bold, "update completed successfully!");
-    Ok(())
 }
 
 fn get_latest_release() -> Result<GitHubRelease> {
@@ -375,69 +436,71 @@ fn get_latest_release() -> Result<GitHubRelease> {
     let response = client
         .get("https://api.github.com/repos/u-tra/textra/releases/latest")
         .header("User-Agent", "Textra-Updater")
-        .send();
-    if let Ok(response) = response {
-        let release = response.json::<GitHubRelease>()?;
-        Ok(release)
+        .send()
+        .context("Failed to contact GitHub API")?;
+
+    if response.status().is_success() {
+        response.json::<GitHubRelease>()
+            .context("Failed to parse GitHub response")
     } else {
-        Err(anyhow::anyhow!("Failed to get latest release"))
+        Err(anyhow::anyhow!("GitHub API returned status: {}", response.status()))
     }
 }
 
- fn download_file(url: &str, path: &PathBuf) -> Result<()> {
+fn download_file(url: &str, path: &PathBuf) -> Result<()> {
     let client = reqwest::blocking::Client::new();
     let response = client
         .get(url)
         .header("User-Agent", "Textra-Updater")
-        .send();
-    
+        .send()
+        .context("Failed to download update")?;
 
-    if let Ok(response) = response {
-      if response.status().is_success() {
-        let mut file = File::create(path)?;
-        let mut content = response.bytes()?;
-        file.write_all(&content)?;
-      }
-    }
-    Ok(())
-}
-
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Version(u32, u32, u32, u32);
-
-impl Version {
-    fn parse(version_str: &str) -> Result<Self> {
-        let parts: Vec<&str> = version_str.split('.').collect();
-        Ok(Version(parts[0].parse().unwrap(), parts[1].parse().unwrap(), parts[2].parse().unwrap(), parts[3].parse().unwrap()))
+    if response.status().is_success() {
+        let content = response.bytes()
+            .context("Failed to read download content")?;
+        let mut file = File::create(path)
+            .context("Failed to create temporary file")?;
+        file.write_all(&content)
+            .context("Failed to write update to disk")?;
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("Download failed with status: {}", response.status()))
     }
 }
 
 fn get_current_version() -> Result<Version> {
-    // Parse current version from Cargo.toml or embedded version
     let version_str = env!("CARGO_PKG_VERSION");
-    let current_version = Version::parse(version_str)
-        .context("Failed to parse current version")?;
-    Ok(current_version)
+    Version::parse(version_str)
+        .context("Failed to parse current version")
 }
 
 fn parse_version_from_tag(tag: &str) -> Result<Version> {
-    // Convert v2024.11.23.002010 format to semver format
-    let parts: Vec<&str> = tag.trim_start_matches('v').split('.').collect();
-    if parts.len() != 4 {
-        return Err(anyhow::anyhow!("Invalid version tag format"));
-    }
-
-    let version = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
-    Version::parse(&version).context("Failed to parse version from tag")
+    Version::parse(tag)
+        .context(format!("Failed to parse version from tag: {}", tag))
 }
 
-pub   fn update_if_available() -> Result<()> {
-    if check_for_updates()? {
-        showln!(gray_dim, "new version available, updating...");
-        handle_update()?;
-    } else {
-        showln!(gray_dim, "textra is up to date!");
+pub fn update_if_available() -> Result<()> {
+    let current_version = get_current_version()?;
+    showln!(gray_dim, "checking for updates (current version: ", yellow_bold, &current_version.to_string(), gray_dim, ")");
+
+    match check_for_updates() {
+        Ok(true) => {
+            showln!(gray_dim, "new version available, starting update...");
+            match handle_update() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    showln!(red_bold, "update failed: {}", e);
+                    Err(e)
+                }
+            }
+        }
+        Ok(false) => {
+            showln!(gray_dim, "textra is up to date!");
+            Ok(())
+        }
+        Err(e) => {
+            showln!(orange_bold, "failed to check for updates: {}", e);
+            Err(e)
+        }
     }
-    Ok(())
 }
