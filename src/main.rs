@@ -40,6 +40,7 @@ fn main() -> Result<()> {
         "stop" | "kill" => handle_stop(),
         "install" | "setup" => handle_install(),
         "uninstall" | "remove" => handle_uninstall(),
+        "update" => handle_update(),
         _ => {
             match auto_install() {
                 Ok(_) => {

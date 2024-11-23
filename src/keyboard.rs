@@ -18,7 +18,7 @@ use tempfile::Builder;
 
 use crate::{load_config, view, watch_config, AppState, Replacement, TextraConfig, MAX_TEXT_LENGTH};
 
-const KEY_DELAY: u64 = 10;
+const KEY_DELAY: u64 = 2;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Message {

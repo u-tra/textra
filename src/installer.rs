@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
+use io::Write;
 use minimo::showln;
 use std::env;
 use std::fs;
+use std::fs::File;
 use std::path::PathBuf;
 use std::ptr;
 use winapi::um::winuser::{SendMessageTimeoutA, HWND_BROADCAST, WM_SETTINGCHANGE};
@@ -301,4 +303,141 @@ fn update_environment_message() {
             ptr::null_mut(),
         );
     }
+}
+
+
+ 
+use serde::Deserialize;
+ 
+use std::time::Duration;
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    assets: Vec<GitHubAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+pub   fn check_for_updates() -> Result<bool> {
+    showln!(gray_dim, "checking for updates...");
+    
+    let current_version = get_current_version()?;
+    let latest_release = get_latest_release()?;
+    
+    let latest_version = parse_version_from_tag(&latest_release.tag_name)?;
+    
+    Ok(latest_version > current_version)
+}
+
+pub fn handle_update() -> Result<()> {
+    showln!(gray_dim, "starting update process...");
+
+    let latest_release = get_latest_release()?;
+    
+    // Find textra.exe asset
+    let textra_asset = latest_release.assets
+        .iter()
+        .find(|asset| asset.name == "textra.exe")
+        .context("Could not find textra.exe in release assets")?;
+
+    // Download new version to temporary location
+    let temp_path = get_install_dir()?.join("textra.exe.new");
+    download_file(&textra_asset.browser_download_url, &temp_path)?;
+
+    // Stop running instance
+    if is_service_running() {
+        showln!(orange_bold, "stopping current instance for update...");
+        handle_stop()?;
+    }
+
+    // Replace old executable
+    let install_path = get_install_dir()?.join("textra.exe");
+    fs::rename(&temp_path, &install_path)
+        .context("Failed to replace old executable")?;
+
+    // Restart service
+    handle_run()?;
+
+    showln!(green_bold, "update completed successfully!");
+    Ok(())
+}
+
+fn get_latest_release() -> Result<GitHubRelease> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let response = client
+        .get("https://api.github.com/repos/u-tra/textra/releases/latest")
+        .header("User-Agent", "Textra-Updater")
+        .send();
+    if let Ok(response) = response {
+        let release = response.json::<GitHubRelease>()?;
+        Ok(release)
+    } else {
+        Err(anyhow::anyhow!("Failed to get latest release"))
+    }
+}
+
+ fn download_file(url: &str, path: &PathBuf) -> Result<()> {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .get(url)
+        .header("User-Agent", "Textra-Updater")
+        .send();
+    
+
+    if let Ok(response) = response {
+      if response.status().is_success() {
+        let mut file = File::create(path)?;
+        let mut content = response.bytes()?;
+        file.write_all(&content)?;
+      }
+    }
+    Ok(())
+}
+
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Version(u32, u32, u32, u32);
+
+impl Version {
+    fn parse(version_str: &str) -> Result<Self> {
+        let parts: Vec<&str> = version_str.split('.').collect();
+        Ok(Version(parts[0].parse().unwrap(), parts[1].parse().unwrap(), parts[2].parse().unwrap(), parts[3].parse().unwrap()))
+    }
+}
+
+fn get_current_version() -> Result<Version> {
+    // Parse current version from Cargo.toml or embedded version
+    let version_str = env!("CARGO_PKG_VERSION");
+    let current_version = Version::parse(version_str)
+        .context("Failed to parse current version")?;
+    Ok(current_version)
+}
+
+fn parse_version_from_tag(tag: &str) -> Result<Version> {
+    // Convert v2024.11.23.002010 format to semver format
+    let parts: Vec<&str> = tag.trim_start_matches('v').split('.').collect();
+    if parts.len() != 4 {
+        return Err(anyhow::anyhow!("Invalid version tag format"));
+    }
+
+    let version = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+    Version::parse(&version).context("Failed to parse version from tag")
+}
+
+pub   fn update_if_available() -> Result<()> {
+    if check_for_updates()? {
+        showln!(gray_dim, "new version available, updating...");
+        handle_update()?;
+    } else {
+        showln!(gray_dim, "textra is up to date!");
+    }
+    Ok(())
 }
