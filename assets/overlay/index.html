@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
+    <title>Textra Overlay</title>
+    <link rel="stylesheet" href="assets/overlay/css/styles.css">
+</head>
+<body>
+    <div id="overlay" class="overlay-container">
+        <div class="overlay-panel">
+            <!-- Header section -->
+            <div class="overlay-header">
+                <h1>Textra</h1>
+                <button class="close-button" id="close-button" title="Close (Esc)">&times;</button>
+            </div>
+
+            <!-- Search section -->
+            <div class="search-container">
+                <input 
+                    type="text" 
+                    class="search-input" 
+                    id="search-input"
+                    placeholder="Search templates... (just start typing)"
+                    autocomplete="off"
+                    spellcheck="false"
+                />
+            </div>
+
+            <!-- Templates container -->
+            <div class="templates-container" id="templates-container" role="listbox">
+                <!-- Templates will be inserted here -->
+                <div class="empty-message">
+                    Loading templates...
+                </div>
+            </div>
+
+            <!-- Status bar -->
+            <div class="status-bar">
+                <span class="shortcut-hint">
+                    <kbd>ESC</kbd> to close | 
+                    <kbd>↑</kbd><kbd>↓</kbd> to navigate | 
+                    <kbd>Enter</kbd> to select | 
+                    <kbd>/</kbd> to search
+                </span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Error message template -->
+    <template id="error-template">
+        <div class="empty-message error">
+            Failed to load templates. Please try again.
+            <button class="retry-button">Retry</button>
+        </div>
+    </template>
+
+    <!-- Category template -->
+    <template id="category-template">
+        <div class="category expanded" data-category="">
+            <div class="category-header" role="button" tabindex="0">
+                <span class="category-name"></span>
+                <span class="category-count"></span>
+            </div>
+            <div class="template-list" role="group"></div>
+        </div>
+    </template>
+
+    <!-- Template item template -->
+    <template id="template-item-template">
+        <div class="template-item" role="option" tabindex="0">
+            <div class="template-trigger"></div>
+            <div class="template-text"></div>
+            <div class="template-description"></div>
+        </div>
+    </template>
+
+    <!-- Empty state template -->
+    <template id="empty-state-template">
+        <div class="empty-message">
+            No templates found. Try a different search or add some templates in your config file!
+        </div>
+    </template>
+
+    <!-- Load application script -->
+    <script src="assets/overlay/js/overlay.js"></script>
+
+    <!-- Prevent right-click menu -->
+    <script>
+        document.addEventListener('contextmenu', e => e.preventDefault());
+    </script>
+</body>
+</html>
